@@ -3,6 +3,13 @@ from collectors.public_pages import collect as pages_collect
 from collectors.fallback import get_fallback
 
 
+LAST_SOURCE_STATUS = {
+    "yubb": {"ok": False, "count": 0, "error": ""},
+    "public_pages": {"ok": False, "count": 0, "error": ""},
+    "fallback": {"ok": False, "count": 0, "error": ""},
+}
+
+
 def deduplicate(data):
     unique = []
     seen = set()
@@ -24,17 +31,46 @@ def deduplicate(data):
 
 
 def collect_all():
+    global LAST_SOURCE_STATUS
+
+    LAST_SOURCE_STATUS = {
+        "yubb": {"ok": False, "count": 0, "error": ""},
+        "public_pages": {"ok": False, "count": 0, "error": ""},
+        "fallback": {"ok": False, "count": 0, "error": ""},
+    }
+
     data = []
 
-    y = yubb_collect()
-    data.extend(y)
+    try:
+        y = yubb_collect()
+        data.extend(y)
+        LAST_SOURCE_STATUS["yubb"]["ok"] = True
+        LAST_SOURCE_STATUS["yubb"]["count"] = len(y)
+        if len(y) == 0:
+            LAST_SOURCE_STATUS["yubb"]["error"] = "coletor executou, mas não encontrou produtos válidos"
+    except Exception as e:
+        LAST_SOURCE_STATUS["yubb"]["error"] = str(e)
 
-    p = pages_collect()
-    data.extend(p)
+    try:
+        p = pages_collect()
+        data.extend(p)
+        LAST_SOURCE_STATUS["public_pages"]["ok"] = True
+        LAST_SOURCE_STATUS["public_pages"]["count"] = len(p)
+        if len(p) == 0:
+            LAST_SOURCE_STATUS["public_pages"]["error"] = "nenhuma página pública retornou produtos válidos"
+    except Exception as e:
+        LAST_SOURCE_STATUS["public_pages"]["error"] = str(e)
 
     data = deduplicate(data)
 
     if not data:
-        data.extend(get_fallback())
+        f = get_fallback()
+        data.extend(f)
+        LAST_SOURCE_STATUS["fallback"]["ok"] = True
+        LAST_SOURCE_STATUS["fallback"]["count"] = len(f)
 
     return data
+
+
+def get_source_status():
+    return LAST_SOURCE_STATUS
