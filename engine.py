@@ -1,7 +1,6 @@
-from collectors.yubb import collect as yubb_collect
-from collectors.public_pages import collect as pages_collect
+from collectors.yubb import collect as collect_yubb
+from collectors.public_pages import collect as collect_public
 from collectors.fallback import get_fallback
-
 
 LAST_SOURCE_STATUS = {
     "yubb": {"ok": False, "count": 0, "error": ""},
@@ -11,16 +10,16 @@ LAST_SOURCE_STATUS = {
 
 
 def deduplicate(data):
-    unique = []
     seen = set()
+    unique = []
 
     for item in data:
         key = (
-            str(item.get("bank", "")).strip().lower(),
-            str(item.get("type", "")).strip().lower(),
-            float(item.get("rate", 0)),
-            int(item.get("days", 0)),
-            bool(item.get("liquidity", False)),
+            item.get("bank"),
+            item.get("type"),
+            item.get("rate"),
+            item.get("days"),
+            item.get("liquidity"),
         )
 
         if key not in seen:
@@ -41,28 +40,35 @@ def collect_all():
 
     data = []
 
+    # YUBB
     try:
-        y = yubb_collect()
+        y = collect_yubb()
         data.extend(y)
         LAST_SOURCE_STATUS["yubb"]["ok"] = True
         LAST_SOURCE_STATUS["yubb"]["count"] = len(y)
+
         if len(y) == 0:
-            LAST_SOURCE_STATUS["yubb"]["error"] = "coletor executou, mas não encontrou produtos válidos"
+            LAST_SOURCE_STATUS["yubb"]["error"] = "não encontrou produtos válidos"
+
     except Exception as e:
         LAST_SOURCE_STATUS["yubb"]["error"] = str(e)
 
+    # PÁGINAS PÚBLICAS
     try:
-        p = pages_collect()
+        p = collect_public()
         data.extend(p)
         LAST_SOURCE_STATUS["public_pages"]["ok"] = True
         LAST_SOURCE_STATUS["public_pages"]["count"] = len(p)
+
         if len(p) == 0:
-            LAST_SOURCE_STATUS["public_pages"]["error"] = "nenhuma página pública retornou produtos válidos"
+            LAST_SOURCE_STATUS["public_pages"]["error"] = "nenhum produto encontrado"
+
     except Exception as e:
         LAST_SOURCE_STATUS["public_pages"]["error"] = str(e)
 
     data = deduplicate(data)
 
+    # FALLBACK
     if not data:
         f = get_fallback()
         data.extend(f)
