@@ -28,7 +28,7 @@ from telegram.ext import (
 # CONFIG
 # =========================================================
 
-BOT_NAME = "Radar de Investimentos PRO"
+BOT_NAME = "Radar de Investimentos PRO novo"
 
 TELEGRAM_BOT_TOKEN = (
     os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
