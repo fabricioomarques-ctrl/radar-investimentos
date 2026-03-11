@@ -1,116 +1,216 @@
-from telegram.ext import Application, CommandHandler
-from config import TELEGRAM_BOT_TOKEN, BOT_NAME, SELIC, CDI
-from engine import collect_all, get_source_status
+import asyncio
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+from engine import collect_all
 from ranking import rank
+from config import TELEGRAM_TOKEN, BENCHMARK_SELIC, CDI_RATE
 
 
-def build_ranked_data():
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = """
+💰 Radar de Investimentos
+
+/menu
+/status
+/ranking
+/diarios
+/curtos
+/isentos
+/benchmark
+"""
+    await update.message.reply_text(text)
+
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     data = collect_all()
+
     ranked = rank(data)
-    return ranked
+
+    total = len(ranked)
+
+    reais = len([r for r in ranked if r["source"] != "Simulação Interna"])
+
+    simulados = len([r for r in ranked if r["source"] == "Simulação Interna"])
+
+    melhores_selic = len([r for r in ranked if r["net"] > BENCHMARK_SELIC])
+
+    diarios = len([r for r in ranked if r["liquidity"]])
+
+    curtos = len([r for r in ranked if r["days"] <= 365])
+
+    isentos = len([r for r in ranked if r["type"] in ["LCI", "LCA"]])
+
+    text = f"""
+🟢 Radar de Investimentos PRO MAX online
+
+📊 Total coletado: {total}
+🌐 Fontes reais: {reais}
+🧪 Fallback/simulação: {simulados}
+
+🏦 Benchmark Selic: {BENCHMARK_SELIC}%
+📈 CDI: {CDI_RATE}%
+
+🚀 Melhores que Selic: {melhores_selic}
+💧 Liquidez diária: {diarios}
+⏱ Curto prazo: {curtos}
+🟢 Isentos (LCI/LCA): {isentos}
+"""
+
+    await update.message.reply_text(text)
 
 
-def format_item(i, r):
-    sim_label = "🧪 Dado de exemplo\n" if r["bank"] == "Simulação Interna" else ""
-    rare_label = "🔥 OPORTUNIDADE RARA\n" if r.get("rare") else ""
-    selic_label = "✅ Melhor que Selic" if r["beats_selic"] else "➖ Não supera a Selic"
+async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    msg = ""
-    msg += f"{sim_label}{rare_label}{i}️⃣ {r['type']} {r['rate']}% CDI\n"
-    msg += f"🏦 Instituição: {r['bank']}\n"
-    msg += f"📅 Prazo: {r['days']} dias\n"
-    msg += f"💧 Liquidez diária: {'Sim' if r['liquidity'] else 'Não'}\n"
-    msg += f"🧾 Retorno bruto estimado: {r['gross']:.2f}% a.a.\n"
-    msg += f"💰 Retorno líquido estimado: {r['net']:.2f}% a.a.\n"
-    msg += f"📊 Score: {r['score']}\n"
-    msg += f"{r['classification']}\n"
-    msg += f"{selic_label}\n\n"
-    return msg
+    data = collect_all()
 
+    ranked = rank(data)
 
-async def start_cmd(update, context):
-    msg = (
-        f"💰 {BOT_NAME}\n\n"
-        "/ranking - ver ranking\n"
-        "/top10 - top 10\n"
-        "/diarios - CDB liquidez diária\n"
-        "/curtos - CDB curto prazo\n"
-        "/isentos - LCI/LCA\n"
-        "/selicplus - melhores que Selic\n"
-        "/benchmark - ver benchmark\n"
-        "/status - ver status"
-    )
-    await update.message.reply_text(msg)
+    text = "🏆 Ranking de oportunidades\n\n"
+
+    for i, r in enumerate(ranked[:10], start=1):
+
+        tag = "🟢 BOA OPORTUNIDADE" if r["score"] >= 5 else "⚪ OPORTUNIDADE PADRÃO"
+
+        supera = "🚀 Supera Selic" if r["net"] > BENCHMARK_SELIC else "➖ Não supera a Selic"
+
+        text += f"""
+{ i }️⃣ {r["type"]} {r["rate"]}% CDI
+🏦 Instituição: {r["bank"]}
+📅 Prazo: {r["days"]} dias
+💧 Liquidez diária: {"Sim" if r["liquidity"] else "Não"}
+🧾 Retorno bruto estimado: {r["gross"]:.2f}% a.a.
+💰 Retorno líquido estimado: {r["net"]:.2f}% a.a.
+📊 Score: {r["score"]}
+{tag}
+{supera}
+
+"""
+
+    await update.message.reply_text(text)
 
 
-async def benchmark_cmd(update, context):
-    msg = (
-        "🏦 Benchmark\n\n"
-        f"Tesouro Selic: {SELIC:.2f}%\n"
-        f"CDI: {CDI:.2f}%"
-    )
-    await update.message.reply_text(msg)
+async def diarios(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    data = collect_all()
+
+    ranked = rank(data)
+
+    diarios = [r for r in ranked if r["liquidity"]]
+
+    if not diarios:
+
+        await update.message.reply_text(
+            "💧 CDBs de liquidez diária\n\nNenhuma oportunidade encontrada na fonte monitorada agora."
+        )
+        return
+
+    text = "💧 CDBs de liquidez diária\n\n"
+
+    for i, r in enumerate(diarios[:10], start=1):
+
+        text += f"""
+{i}️⃣ {r["type"]} {r["rate"]}% CDI
+🏦 {r["bank"]}
+📅 {r["days"]} dias
+💰 {r["net"]:.2f}% a.a.
+
+"""
+
+    await update.message.reply_text(text)
 
 
-async def status_cmd(update, context):
-    ranked = build_ranked_data()
-    source_status = get_source_status()
+async def curtos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    real_count = sum(1 for i in ranked if i["bank"] != "Simulação Interna")
-    sim_count = sum(1 for i in ranked if i["bank"] == "Simulação Interna")
+    data = collect_all()
 
-    beats_selic = sum(1 for i in ranked if i["net"] > SELIC)
-    diarios = sum(1 for i in ranked if i["type"] == "CDB" and i["liquidity"])
-    curtos = sum(1 for i in ranked if i["type"] == "CDB" and i["days"] <= 365)
-    isentos = sum(1 for i in ranked if i["type"] in ["LCI", "LCA"])
+    ranked = rank(data)
 
-    yubb_status = source_status.get("yubb", {})
-    public_status = source_status.get("public_pages", {})
+    curtos = [r for r in ranked if r["days"] <= 365]
 
-    msg = (
-        f"🟢 {BOT_NAME} online\n\n"
-        f"📊 Total coletado: {len(ranked)}\n"
-        f"🌐 Fontes reais: {real_count}\n"
-        f"🧪 Fallback/simulação: {sim_count}\n\n"
-        f"🏦 Benchmark Selic: {SELIC:.2f}%\n"
-        f"📈 CDI: {CDI:.2f}%\n\n"
-        f"🚀 Melhores que Selic: {beats_selic}\n"
-        f"💧 Liquidez diária: {diarios}\n"
-        f"⏱ Curto prazo: {curtos}\n"
-        f"🟢 Isentos (LCI/LCA): {isentos}\n\n"
-        f"🔎 Yubb: {yubb_status.get('count', 0)}\n"
-        f"🌍 Páginas públicas: {public_status.get('count', 0)}"
-    )
+    if not curtos:
 
-    if yubb_status.get("error"):
-        msg += f"\n\n⚠️ Yubb: {yubb_status['error'][:180]}"
+        await update.message.reply_text(
+            "⏱ CDBs de prazo curto\n\nNenhuma oportunidade encontrada na fonte monitorada agora."
+        )
+        return
 
-    if public_status.get("error"):
-        msg += f"\n⚠️ Públicas: {public_status['error'][:180]}"
+    text = "⏱ CDBs de prazo curto\n\n"
 
-    await update.message.reply_text(msg)
+    for i, r in enumerate(curtos[:10], start=1):
+
+        text += f"""
+{i}️⃣ {r["type"]} {r["rate"]}% CDI
+🏦 {r["bank"]}
+📅 {r["days"]} dias
+💰 {r["net"]:.2f}% a.a.
+
+"""
+
+    await update.message.reply_text(text)
 
 
-async def ranking_cmd(update, context):
-    ranked = build_ranked_data()
+async def isentos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    msg = "🏆 Ranking de oportunidades\n\n"
-    for i, r in enumerate(ranked[:10], 1):
-        msg += format_item(i, r)
+    data = collect_all()
 
-    await update.message.reply_text(msg)
+    ranked = rank(data)
+
+    isentos = [r for r in ranked if r["type"] in ["LCI", "LCA"]]
+
+    if not isentos:
+
+        await update.message.reply_text(
+            "🟢 LCI / LCA\n\nNenhuma oportunidade encontrada na fonte monitorada agora."
+        )
+        return
+
+    text = "🟢 LCI / LCA\n\n"
+
+    for i, r in enumerate(isentos[:10], start=1):
+
+        text += f"""
+{i}️⃣ {r["type"]} {r["rate"]}% CDI
+🏦 {r["bank"]}
+📅 {r["days"]} dias
+💰 {r["net"]:.2f}% a.a.
+
+"""
+
+    await update.message.reply_text(text)
 
 
-async def top10_cmd(update, context):
-    ranked = build_ranked_data()
+async def benchmark(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    msg = "🔝 Top 10 oportunidades\n\n"
-    for i, r in enumerate(ranked[:10], 1):
-        msg += format_item(i, r)
+    text = f"""
+🏦 Benchmark
 
-    await update.message.reply_text(msg)
+Tesouro Selic
+
+Taxa aproximada:
+{BENCHMARK_SELIC}%
+"""
+
+    await update.message.reply_text(text)
 
 
-async def diarios_cmd(update, context):
-    ranked = build_ranked_data()
-    diarios = [r for r in ranked if r["type"] ==
+def main():
+
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("ranking", ranking))
+    app.add_handler(CommandHandler("diarios", diarios))
+    app.add_handler(CommandHandler("curtos", curtos))
+    app.add_handler(CommandHandler("isentos", isentos))
+    app.add_handler(CommandHandler("benchmark", benchmark))
+
+    print("Bot rodando...")
+
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
