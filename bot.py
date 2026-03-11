@@ -1,9 +1,11 @@
 import os
+import re
 import json
+import html
 import logging
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -42,12 +44,8 @@ ALERT_CHAT_ID = (
 
 CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "5"))
 
-# Modo do benchmark:
-# "fixed" = usa valores fixos do código/variáveis
-# "live" = tenta API e cai no fixo se falhar
+# Mantemos benchmark fixo para deixar o radar estável
 BENCHMARK_MODE = os.getenv("BENCHMARK_MODE", "fixed").strip().lower()
-
-# Benchmark fixo padrão
 FIXED_SELIC_ANNUAL = float(os.getenv("FIXED_SELIC_ANNUAL", "10.75"))
 FIXED_CDI_ANNUAL = float(os.getenv("FIXED_CDI_ANNUAL", "10.65"))
 
@@ -70,11 +68,12 @@ DEFAULT_SETTINGS = {
     "max_items_per_command": 10,
 }
 
+# Fallback genérico para não confundir com oferta real de banco específico
 MANUAL_FALLBACK_OFFERS = [
     {
         "source": "manual_fallback",
-        "institution": "Sofisa",
-        "product_name": "CDB Sofisa Liquidez Diária",
+        "institution": "Instituição Exemplo",
+        "product_name": "CDB Liquidez Diária Exemplo",
         "product_type": "CDB",
         "rate_type": "CDI",
         "rate_value": 102.0,
@@ -86,8 +85,8 @@ MANUAL_FALLBACK_OFFERS = [
     },
     {
         "source": "manual_fallback",
-        "institution": "Master",
-        "product_name": "CDB Master 12 meses",
+        "institution": "Emissor Exemplo",
+        "product_name": "CDB Prazo Curto Exemplo",
         "product_type": "CDB",
         "rate_type": "CDI",
         "rate_value": 110.0,
@@ -99,8 +98,8 @@ MANUAL_FALLBACK_OFFERS = [
     },
     {
         "source": "manual_fallback",
-        "institution": "BS2",
-        "product_name": "LCI BS2",
+        "institution": "Banco Exemplo",
+        "product_name": "LCI Exemplo",
         "product_type": "LCI",
         "rate_type": "CDI",
         "rate_value": 92.0,
@@ -299,29 +298,34 @@ def build_unique_id(inv: Investment) -> str:
 def calculate_score(inv: Investment, selic_annual: float) -> float:
     score = 0.0
 
+    # Peso principal da taxa mais agressivo do que antes
     if inv.rate_type.upper() == "CDI":
         if inv.product_type.upper() in ("LCI", "LCA"):
-            if inv.rate_value >= 95:
-                score += 4.0
+            if inv.rate_value >= 97:
+                score += 5.0
+            elif inv.rate_value >= 95:
+                score += 4.5
             elif inv.rate_value >= 92:
-                score += 3.2
-            elif inv.rate_value >= 90:
-                score += 2.6
-            else:
-                score += 1.8
-        else:
-            if inv.rate_value >= 115:
-                score += 4.3
-            elif inv.rate_value >= 110:
                 score += 3.8
-            elif inv.rate_value >= 107:
-                score += 3.1
-            elif inv.rate_value >= 105:
-                score += 2.5
-            elif inv.rate_value >= 102:
-                score += 2.0
+            elif inv.rate_value >= 90:
+                score += 3.2
             else:
-                score += 1.2
+                score += 2.0
+        else:
+            if inv.rate_value >= 120:
+                score += 5.4
+            elif inv.rate_value >= 115:
+                score += 4.8
+            elif inv.rate_value >= 110:
+                score += 4.2
+            elif inv.rate_value >= 108:
+                score += 3.7
+            elif inv.rate_value >= 105:
+                score += 3.1
+            elif inv.rate_value >= 102:
+                score += 2.4
+            else:
+                score += 1.5
 
     if inv.liquidity_daily:
         score += 1.4
@@ -347,10 +351,13 @@ def calculate_score(inv: Investment, selic_annual: float) -> float:
     if inv.beats_selic:
         score += 1.6
 
+    # Ajuste por retorno líquido
     if inv.net_annual_return >= selic_annual + 1.0:
         score += 1.2
     elif inv.net_annual_return >= selic_annual:
         score += 0.8
+    elif inv.net_annual_return >= selic_annual - 0.5:
+        score += 0.3
 
     return round(min(score, 10.0), 1)
 
@@ -358,15 +365,15 @@ def calculate_score(inv: Investment, selic_annual: float) -> float:
 def score_to_classification(score: float) -> str:
     if score >= 9.0:
         return "🔴 OPORTUNIDADE IMPERDÍVEL"
-    if score >= 8.0:
+    if score >= 7.8:
         return "🟡 OPORTUNIDADE FORTE"
-    if score >= 7.0:
+    if score >= 6.8:
         return "🟢 BOA OPORTUNIDADE"
     return "⚪ OPORTUNIDADE PADRÃO"
 
 
 # =========================================================
-# FONTES
+# FONTES / BENCHMARK
 # =========================================================
 
 async def fetch_json(session: aiohttp.ClientSession, url: str, timeout: int = 20) -> Any:
@@ -394,42 +401,33 @@ def fixed_benchmark() -> Dict[str, float]:
     }
 
 
-async def get_live_benchmark(session: aiohttp.ClientSession) -> Dict[str, float]:
-    selic = FIXED_SELIC_ANNUAL
-    cdi = FIXED_CDI_ANNUAL
+async def get_selic_benchmark(session: aiohttp.ClientSession) -> Dict[str, float]:
+    # Mantemos fixo por padrão
+    if BENCHMARK_MODE != "live":
+        return fixed_benchmark()
 
+    selic = FIXED_SELIC_ANNUAL
     try:
         url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.432/dados/ultimos/1?formato=json"
         data = await fetch_json(session, url)
         if data and isinstance(data, list):
             valor = str(data[0].get("valor", "")).replace(",", ".")
             selic_api = float(valor)
-
-            # Faixa deliberadamente apertada para evitar erro grotesco da API
             if 7.0 <= selic_api <= 13.5:
                 selic = selic_api
             else:
-                logger.warning("Selic da API ignorada por estar fora da faixa esperada: %s", selic_api)
+                logger.warning("Selic da API ignorada por faixa: %s", selic_api)
     except Exception as e:
-        logger.warning("Falha ao buscar benchmark ao vivo. Usando fixo: %s", e)
+        logger.warning("Falha no benchmark ao vivo. Mantendo fixo: %s", e)
 
     cdi = round(max(selic - 0.10, 0.0), 2)
-    return {
-        "selic_annual": round(selic, 2),
-        "cdi_annual": round(cdi, 2),
-    }
-
-
-async def get_selic_benchmark(session: aiohttp.ClientSession) -> Dict[str, float]:
-    if BENCHMARK_MODE == "live":
-        return await get_live_benchmark(session)
-    return fixed_benchmark()
+    return {"selic_annual": round(selic, 2), "cdi_annual": round(cdi, 2)}
 
 
 async def collect_manual_fallback() -> List[Investment]:
-    investments = []
+    items = []
     for item in MANUAL_FALLBACK_OFFERS:
-        investments.append(
+        items.append(
             Investment(
                 source=item["source"],
                 institution=item["institution"],
@@ -444,10 +442,142 @@ async def collect_manual_fallback() -> List[Investment]:
                 url=item.get("url", ""),
             )
         )
-    return investments
+    return items
+
+
+def normalize_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(text or "")).strip()
+
+
+def infer_term_days(text: str) -> int:
+    low = text.lower()
+
+    # 1º padrões em meses
+    m = re.search(r"(\d{1,2})\s*mes(?:es)?", low)
+    if m:
+        return int(m.group(1)) * 30
+
+    # anos
+    y = re.search(r"(\d{1,2})\s*ano(?:s)?", low)
+    if y:
+        return int(y.group(1)) * 365
+
+    # dias
+    d = re.search(r"(\d{2,4})\s*dias?", low)
+    if d:
+        return int(d.group(1))
+
+    if "liquidez diária" in low or "liquidez diaria" in low:
+        return 1
+
+    return 365
+
+
+def infer_minimum_investment(text: str) -> float:
+    low = text.lower()
+
+    # tenta R$ 1.000,00 / r$1000 / mínimo 100 etc
+    patterns = [
+        r"r\$\s*([\d\.\,]+)",
+        r"m[ií]nimo(?: de aplica[cç][aã]o)?\s*[:\-]?\s*([\d\.\,]+)",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, low)
+        if m:
+            val = m.group(1).replace(".", "").replace(",", ".")
+            try:
+                return float(val)
+            except Exception:
+                pass
+
+    return 1000.0
+
+
+def infer_product_type(text: str) -> Optional[str]:
+    low = text.lower()
+    if "lci" in low:
+        return "LCI"
+    if "lca" in low:
+        return "LCA"
+    if "cdb" in low:
+        return "CDB"
+    return None
+
+
+def infer_rate_value(text: str) -> Optional[float]:
+    low = text.lower()
+
+    # padrões tipo 110% do cdi / 110% cdi / 110,5%
+    patterns = [
+        r"(\d{2,3}(?:[\.,]\d{1,2})?)\s*%\s*(?:do\s*)?cdi",
+        r"(\d{2,3}(?:[\.,]\d{1,2})?)\s*%",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, low)
+        if m:
+            raw = m.group(1).replace(".", "").replace(",", ".")
+            try:
+                num = float(raw)
+                if 70 <= num <= 200:
+                    return num
+            except Exception:
+                pass
+    return None
+
+
+def infer_liquidity_daily(text: str) -> bool:
+    low = text.lower()
+    return "liquidez diária" in low or "liquidez diaria" in low
+
+
+def parse_candidate_block(text: str, url: str) -> Optional[Investment]:
+    clean = normalize_spaces(text)
+    if len(clean) < 20:
+        return None
+
+    product_type = infer_product_type(clean)
+    if not product_type:
+        return None
+
+    rate_value = infer_rate_value(clean)
+    if rate_value is None:
+        return None
+
+    liquidity_daily = infer_liquidity_daily(clean)
+    term_days = infer_term_days(clean)
+    minimum_investment = infer_minimum_investment(clean)
+
+    # nome um pouco melhor do que "encontrado no Yubb"
+    name = f"{product_type} Yubb"
+    if liquidity_daily and product_type == "CDB":
+        name = "CDB Yubb Liquidez Diária"
+    elif product_type == "CDB" and term_days <= 540:
+        name = "CDB Yubb Prazo Curto"
+
+    return Investment(
+        source="yubb",
+        institution="Yubb",
+        product_name=name,
+        product_type=product_type,
+        rate_type="CDI",
+        rate_value=float(rate_value),
+        liquidity_daily=liquidity_daily,
+        term_days=term_days,
+        minimum_investment=minimum_investment,
+        fgc=True,
+        url=url,
+    )
 
 
 async def collect_yubb(session: aiohttp.ClientSession) -> List[Investment]:
+    """
+    Coletor mais tolerante:
+    - analisa blocos HTML
+    - analisa script/json embutido
+    - usa regex sobre trechos com CDB/LCI/LCA
+    """
     results: List[Investment] = []
 
     candidate_urls = [
@@ -457,76 +587,49 @@ async def collect_yubb(session: aiohttp.ClientSession) -> List[Investment]:
 
     for url in candidate_urls:
         try:
-            html = await fetch_text(session, url, timeout=20)
-            soup = BeautifulSoup(html, "html.parser")
+            html_text = await fetch_text(session, url, timeout=20)
+            soup = BeautifulSoup(html_text, "html.parser")
 
-            page_text = soup.get_text(" ", strip=True).lower()
-            if not any(x in page_text for x in ["cdb", "lci", "lca"]):
-                continue
+            candidates: List[str] = []
 
-            blocks = soup.find_all(["div", "article", "section"])
-            found = 0
+            # 1) blocos visuais
+            for block in soup.find_all(["div", "article", "section", "li"]):
+                txt = normalize_spaces(block.get_text(" ", strip=True))
+                low = txt.lower()
+                if any(x in low for x in ["cdb", "lci", "lca"]) and "%" in low:
+                    candidates.append(txt)
 
-            for block in blocks:
-                text = block.get_text(" ", strip=True)
-                low = text.lower()
+            # 2) scripts / json embutido
+            for script in soup.find_all("script"):
+                raw = normalize_spaces(script.get_text(" ", strip=True))
+                low = raw.lower()
+                if any(x in low for x in ["cdb", "lci", "lca"]) and "%" in low:
+                    # quebra em trechos menores para facilitar
+                    chunks = re.split(r"[{}\[\]\n\r;]+", raw)
+                    for chunk in chunks:
+                        c = normalize_spaces(chunk)
+                        cl = c.lower()
+                        if any(x in cl for x in ["cdb", "lci", "lca"]) and "%" in cl:
+                            candidates.append(c)
 
-                if not any(x in low for x in ["cdb", "lci", "lca"]):
-                    continue
-
-                if "lci" in low:
-                    product_type = "LCI"
-                elif "lca" in low:
-                    product_type = "LCA"
-                elif "cdb" in low:
-                    product_type = "CDB"
-                else:
-                    continue
-
-                rate_value = None
-                for token in text.replace("%", " % ").split():
-                    t = token.replace(",", ".")
-                    try:
-                        num = float(t)
-                        if 70 <= num <= 200:
-                            rate_value = num
-                            break
-                    except Exception:
-                        pass
-
-                if rate_value is None:
-                    continue
-
-                liquidity_daily = "liquidez diária" in low or "liquidez diaria" in low
-                term_days = 365
-
-                if "90 dias" in low:
-                    term_days = 90
-                elif "180 dias" in low:
-                    term_days = 180
-                elif "12 meses" in low or "1 ano" in low:
-                    term_days = 365
-                elif "24 meses" in low or "2 anos" in low:
-                    term_days = 730
-
-                results.append(
-                    Investment(
-                        source="yubb",
-                        institution="Yubb",
-                        product_name=f"{product_type} encontrado no Yubb",
-                        product_type=product_type,
-                        rate_type="CDI",
-                        rate_value=float(rate_value),
-                        liquidity_daily=liquidity_daily,
-                        term_days=term_days,
-                        minimum_investment=1000.0,
-                        fgc=True,
-                        url=url,
-                    )
+            # 3) regex em torno de palavras-chave na página inteira
+            full_text = normalize_spaces(soup.get_text(" ", strip=True))
+            full_low = full_text.lower()
+            if any(x in full_low for x in ["cdb", "lci", "lca"]):
+                windows = re.findall(
+                    r"(.{0,80}(?:cdb|lci|lca).{0,160})",
+                    full_text,
+                    flags=re.IGNORECASE,
                 )
+                candidates.extend(windows)
 
-                found += 1
-                if found >= 15:
+            parsed_count = 0
+            for cand in candidates:
+                inv = parse_candidate_block(cand, url)
+                if inv:
+                    results.append(inv)
+                    parsed_count += 1
+                if parsed_count >= 20:
                     break
 
             if results:
@@ -599,7 +702,6 @@ def apply_filters(investments: List[Investment], settings: Dict[str, Any]) -> Di
     ]
 
     selicplus = [i for i in investments if i.beats_selic]
-
     ranking = sorted(investments, key=lambda x: (x.score, x.net_annual_return), reverse=True)
     top10 = ranking[:10]
 
@@ -615,7 +717,6 @@ def apply_filters(investments: List[Investment], settings: Dict[str, Any]) -> Di
 
 async def collect_all_sources(settings: Dict[str, Any]) -> Dict[str, Any]:
     benchmark = fixed_benchmark()
-
     all_investments: List[Investment] = []
     source_status: Dict[str, int] = {}
 
@@ -941,14 +1042,32 @@ async def cmd_selicplus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def cmd_atualizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await send_with_keyboard(update, "🔄 Atualizando radar...")
+    # Mensagens mais profissionais
+    progress_msg = await update.message.reply_text(
+        "🔎 Buscando oportunidades...\n📡 Consultando fontes...\n📊 Calculando ranking...",
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=build_main_keyboard(),
+    )
+
     try:
         cache_data = await collect_all_sources(load_settings())
         await send_new_alerts(context.application, cache_data)
-        await send_with_keyboard(update, "✅ Radar atualizado com sucesso.")
+
+        await progress_msg.edit_text(
+            "✅ <b>Radar atualizado com sucesso.</b>\n\nUse os botões abaixo ou os comandos do menu.",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=build_main_keyboard(),
+        )
     except Exception as e:
         logger.exception("Erro na atualização manual: %s", e)
-        await send_with_keyboard(update, f"❌ Erro ao atualizar o radar: {e}")
+        await progress_msg.edit_text(
+            f"❌ <b>Erro ao atualizar o radar.</b>\n\nDetalhe: {html.escape(str(e))}",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=build_main_keyboard(),
+        )
 
 
 # =========================================================
