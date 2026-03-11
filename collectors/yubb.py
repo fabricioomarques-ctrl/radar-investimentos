@@ -1,5 +1,4 @@
-import requests
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 from utils.parser import (
     extract_cdi,
@@ -9,59 +8,75 @@ from utils.parser import (
     extract_liquidity,
 )
 
-
-URLS = [
-    "https://yubb.com.br/investimentos/renda-fixa",
-    "https://yubb.com.br",
-]
+URL = "https://yubb.com.br/investimentos/renda-fixa"
 
 
 def collect():
     results = []
 
-    for url in URLS:
-        try:
-            r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-            soup = BeautifulSoup(r.text, "html.parser")
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
 
-            # Junta blocos visuais e scripts para tentar capturar mais texto
-            candidate_texts = []
+            page.goto(URL, wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(5000)
 
-            for tag in soup.find_all(["div", "article", "section", "li", "span", "p"]):
-                text = tag.get_text(" ", strip=True)
-                if text and "%" in text:
-                    candidate_texts.append(text)
+            # tenta descer a página para carregar cards lazy
+            for _ in range(4):
+                page.mouse.wheel(0, 3000)
+                page.wait_for_timeout(1500)
 
-            for script in soup.find_all("script"):
-                text = script.get_text(" ", strip=True)
-                if text and "%" in text:
-                    candidate_texts.append(text)
+            content = page.content()
+            text = page.locator("body").inner_text()
 
-            for text in candidate_texts:
-                product_type = extract_product_type(text)
-                rate = extract_cdi(text)
+            browser.close()
 
-                if not product_type or rate is None:
-                    continue
+        candidate_texts = []
 
-                bank = extract_bank(text)
-                days = extract_term_days(text)
-                liquidity = extract_liquidity(text)
+        # blocos maiores primeiro
+        chunks = text.split("\n")
+        for chunk in chunks:
+            c = chunk.strip()
+            if c and "%" in c and any(x in c.lower() for x in ["cdb", "lci", "lca"]):
+                candidate_texts.append(c)
 
-                results.append({
-                    "bank": bank or "Banco não identificado",
-                    "type": product_type,
-                    "rate": rate,
-                    "days": days,
-                    "liquidity": liquidity,
-                    "source": "Yubb",
-                    "url": url,
-                })
+        # janelas de texto para capturar contexto
+        words = text.split()
+        for i in range(0, len(words), 25):
+            window = " ".join(words[i:i+60])
+            if "%" in window and any(x in window.lower() for x in ["cdb", "lci", "lca"]):
+                candidate_texts.append(window)
 
-            if results:
-                break
+        seen = set()
 
-        except Exception:
-            pass
+        for raw in candidate_texts:
+            product_type = extract_product_type(raw)
+            rate = extract_cdi(raw)
+
+            if not product_type or rate is None:
+                continue
+
+            bank = extract_bank(raw) or "Banco não identificado"
+            days = extract_term_days(raw)
+            liquidity = extract_liquidity(raw)
+
+            key = (bank, product_type, rate, days, liquidity)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            results.append({
+                "bank": bank,
+                "type": product_type,
+                "rate": rate,
+                "days": days,
+                "liquidity": liquidity,
+                "source": "Yubb",
+                "url": URL,
+            })
+
+    except Exception:
+        return []
 
     return results
