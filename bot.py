@@ -26,19 +26,43 @@ async def benchmark_cmd(update, context):
 async def status_cmd(update, context):
     data = collect_all()
 
-    real_count = sum(1 for item in data if item["bank"] != "Simulação Interna")
-    sim_count = sum(1 for item in data if item["bank"] == "Simulação Interna")
+    real_count = sum(1 for i in data if i["bank"] != "Simulação Interna")
+    sim_count = sum(1 for i in data if i["bank"] == "Simulação Interna")
+
+    beats_selic = sum(
+        1 for i in data
+        if i.get("net", 0) > SELIC
+    )
+
+    diarios = sum(
+        1 for i in data
+        if i["type"] == "CDB" and i["liquidity"]
+    )
+
+    curtos = sum(
+        1 for i in data
+        if i["type"] == "CDB" and i["days"] <= 365
+    )
+
+    isentos = sum(
+        1 for i in data
+        if i["type"] in ["LCI", "LCA"]
+    )
 
     msg = (
         f"🟢 {BOT_NAME} online\n\n"
-        f"Total coletado: {len(data)}\n"
-        f"Fontes reais: {real_count}\n"
-        f"Fallback/simulação: {sim_count}\n"
-        f"Benchmark Selic: {SELIC:.2f}%\n"
-        f"CDI: {CDI:.2f}%"
+        f"📊 Total coletado: {len(data)}\n"
+        f"🌐 Fontes reais: {real_count}\n"
+        f"🧪 Fallback/simulação: {sim_count}\n\n"
+        f"🏦 Benchmark Selic: {SELIC:.2f}%\n"
+        f"📈 CDI: {CDI:.2f}%\n\n"
+        f"🚀 Melhores que Selic: {beats_selic}\n"
+        f"💧 Liquidez diária: {diarios}\n"
+        f"⏱ Curto prazo: {curtos}\n"
+        f"🟢 Isentos (LCI/LCA): {isentos}"
     )
-    await update.message.reply_text(msg)
 
+    await update.message.reply_text(msg)
 
 async def ranking_cmd(update, context):
     data = collect_all()
