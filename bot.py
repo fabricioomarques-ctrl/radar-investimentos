@@ -1,6 +1,6 @@
 from telegram.ext import Application, CommandHandler
 from config import TELEGRAM_BOT_TOKEN, BOT_NAME, SELIC, CDI
-from engine import collect_all
+from engine import collect_all, get_source_status
 from ranking import rank
 
 
@@ -54,6 +54,7 @@ async def benchmark_cmd(update, context):
 
 async def status_cmd(update, context):
     ranked = build_ranked_data()
+    source_status = get_source_status()
 
     real_count = sum(1 for i in ranked if i["bank"] != "Simulação Interna")
     sim_count = sum(1 for i in ranked if i["bank"] == "Simulação Interna")
@@ -62,6 +63,9 @@ async def status_cmd(update, context):
     diarios = sum(1 for i in ranked if i["type"] == "CDB" and i["liquidity"])
     curtos = sum(1 for i in ranked if i["type"] == "CDB" and i["days"] <= 365)
     isentos = sum(1 for i in ranked if i["type"] in ["LCI", "LCA"])
+
+    yubb_status = source_status.get("yubb", {})
+    public_status = source_status.get("public_pages", {})
 
     msg = (
         f"🟢 {BOT_NAME} online\n\n"
@@ -73,8 +77,16 @@ async def status_cmd(update, context):
         f"🚀 Melhores que Selic: {beats_selic}\n"
         f"💧 Liquidez diária: {diarios}\n"
         f"⏱ Curto prazo: {curtos}\n"
-        f"🟢 Isentos (LCI/LCA): {isentos}"
+        f"🟢 Isentos (LCI/LCA): {isentos}\n\n"
+        f"🔎 Yubb: {yubb_status.get('count', 0)}\n"
+        f"🌍 Páginas públicas: {public_status.get('count', 0)}"
     )
+
+    if yubb_status.get("error"):
+        msg += f"\n\n⚠️ Yubb: {yubb_status['error'][:180]}"
+
+    if public_status.get("error"):
+        msg += f"\n⚠️ Públicas: {public_status['error'][:180]}"
 
     await update.message.reply_text(msg)
 
@@ -101,82 +113,4 @@ async def top10_cmd(update, context):
 
 async def diarios_cmd(update, context):
     ranked = build_ranked_data()
-    diarios = [r for r in ranked if r["type"] == "CDB" and r["liquidity"]]
-
-    if not diarios:
-        await update.message.reply_text("💧 Nenhum CDB com liquidez diária encontrado.")
-        return
-
-    msg = "💧 CDBs de liquidez diária\n\n"
-    for i, r in enumerate(diarios[:10], 1):
-        msg += format_item(i, r)
-
-    await update.message.reply_text(msg)
-
-
-async def curtos_cmd(update, context):
-    ranked = build_ranked_data()
-    curtos = [r for r in ranked if r["type"] == "CDB" and r["days"] <= 365]
-
-    if not curtos:
-        await update.message.reply_text("⏱ Nenhum CDB de curto prazo encontrado.")
-        return
-
-    msg = "⏱ CDBs de curto prazo\n\n"
-    for i, r in enumerate(curtos[:10], 1):
-        msg += format_item(i, r)
-
-    await update.message.reply_text(msg)
-
-
-async def isentos_cmd(update, context):
-    ranked = build_ranked_data()
-    isentos = [r for r in ranked if r["type"] in ["LCI", "LCA"]]
-
-    if not isentos:
-        await update.message.reply_text("🟢 Nenhum investimento isento encontrado.")
-        return
-
-    msg = "🟢 LCI / LCA\n\n"
-    for i, r in enumerate(isentos[:10], 1):
-        msg += format_item(i, r)
-
-    await update.message.reply_text(msg)
-
-
-async def selicplus_cmd(update, context):
-    ranked = build_ranked_data()
-    selicplus = [r for r in ranked if r["net"] > SELIC]
-
-    if not selicplus:
-        await update.message.reply_text("🚀 Nenhum investimento supera a Selic no momento.")
-        return
-
-    msg = "🚀 Melhores que a Selic\n\n"
-    for i, r in enumerate(selicplus[:10], 1):
-        msg += format_item(i, r)
-
-    await update.message.reply_text(msg)
-
-
-def main():
-    if not TELEGRAM_BOT_TOKEN:
-        raise ValueError("Defina TELEGRAM_BOT_TOKEN nas variáveis do Railway.")
-
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("benchmark", benchmark_cmd))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("ranking", ranking_cmd))
-    app.add_handler(CommandHandler("top10", top10_cmd))
-    app.add_handler(CommandHandler("diarios", diarios_cmd))
-    app.add_handler(CommandHandler("curtos", curtos_cmd))
-    app.add_handler(CommandHandler("isentos", isentos_cmd))
-    app.add_handler(CommandHandler("selicplus", selicplus_cmd))
-
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
+    diarios = [r for r in ranked if r["type"] ==
