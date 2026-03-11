@@ -48,9 +48,10 @@ async def ranking_cmd(update, context):
 
     for i, r in enumerate(ranked[:10], 1):
         sim_label = "🧪 Dado de exemplo\n" if r["bank"] == "Simulação Interna" else ""
+        rare_label = "🔥 OPORTUNIDADE RARA\n" if r.get("rare") else ""
         selic_label = "✅ Melhor que Selic" if r["beats_selic"] else "➖ Não supera a Selic"
 
-        msg += f"{sim_label}{i}️⃣ {r['type']} {r['rate']}% CDI\n"
+        msg += f"{sim_label}{rare_label}{i}️⃣ {r['type']} {r['rate']}% CDI\n"
         msg += f"🏦 Instituição: {r['bank']}\n"
         msg += f"📅 Prazo: {r['days']} dias\n"
         msg += f"💧 Liquidez diária: {'Sim' if r['liquidity'] else 'Não'}\n"
