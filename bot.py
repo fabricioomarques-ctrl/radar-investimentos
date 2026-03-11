@@ -57,6 +57,7 @@ async def ranking_cmd(update, context):
         msg += f"🧾 Retorno bruto estimado: {r['gross']:.2f}% a.a.\n"
         msg += f"💰 Retorno líquido estimado: {r['net']:.2f}% a.a.\n"
         msg += f"📊 Score: {r['score']}\n"
+        msg += f"{r['classification']}\n"
         msg += f"{selic_label}\n\n"
 
     await update.message.reply_text(msg)
