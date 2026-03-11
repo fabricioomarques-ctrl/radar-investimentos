@@ -28,7 +28,7 @@ from telegram.ext import (
 # CONFIG
 # =========================================================
 
-BOT_NAME = "Radar de Investimentos PRO novo"
+BOT_NAME = "Radar de Investimentos PRO"
 
 TELEGRAM_BOT_TOKEN = (
     os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -42,13 +42,18 @@ ALERT_CHAT_ID = (
 
 CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "5"))
 
+# Modo do benchmark:
+# "fixed" = usa valores fixos do código/variáveis
+# "live" = tenta API e cai no fixo se falhar
+BENCHMARK_MODE = os.getenv("BENCHMARK_MODE", "fixed").strip().lower()
+
+# Benchmark fixo padrão
+FIXED_SELIC_ANNUAL = float(os.getenv("FIXED_SELIC_ANNUAL", "10.75"))
+FIXED_CDI_ANNUAL = float(os.getenv("FIXED_CDI_ANNUAL", "10.65"))
+
 CACHE_FILE = "radar_cache.json"
 SETTINGS_FILE = "radar_settings.json"
 SENT_ALERTS_FILE = "sent_alerts.json"
-
-# Fallbacks coerentes
-DEFAULT_SELIC_ANNUAL = 10.75
-DEFAULT_CDI_ANNUAL = 10.65
 
 DEFAULT_SETTINGS = {
     "filters": {
@@ -65,7 +70,6 @@ DEFAULT_SETTINGS = {
     "max_items_per_command": 10,
 }
 
-# Fallback local para o radar não ficar “morto”
 MANUAL_FALLBACK_OFFERS = [
     {
         "source": "manual_fallback",
@@ -377,33 +381,22 @@ async def fetch_text(session: aiohttp.ClientSession, url: str, timeout: int = 20
         return await resp.text()
 
 
-def sanitize_benchmark(selic: float, cdi: float) -> Dict[str, float]:
-    """
-    Evita benchmark estranho vindo de API.
-    Se vier algo fora de uma faixa plausível, usa fallback.
-    """
-    if not (5.0 <= selic <= 20.0):
-        selic = DEFAULT_SELIC_ANNUAL
+def fixed_benchmark() -> Dict[str, float]:
+    selic = round(FIXED_SELIC_ANNUAL, 2)
+    cdi = round(FIXED_CDI_ANNUAL, 2)
 
-    if not (4.5 <= cdi <= 19.5):
-        cdi = DEFAULT_CDI_ANNUAL
-
-    # Mantém CDI levemente abaixo da Selic, se necessário
     if cdi > selic:
         cdi = round(max(selic - 0.10, 0.0), 2)
 
     return {
-        "selic_annual": round(selic, 2),
-        "cdi_annual": round(cdi, 2),
+        "selic_annual": selic,
+        "cdi_annual": cdi,
     }
 
 
-async def get_selic_benchmark(session: aiohttp.ClientSession) -> Dict[str, float]:
-    """
-    Busca benchmark com fallback seguro.
-    """
-    selic = DEFAULT_SELIC_ANNUAL
-    cdi = DEFAULT_CDI_ANNUAL
+async def get_live_benchmark(session: aiohttp.ClientSession) -> Dict[str, float]:
+    selic = FIXED_SELIC_ANNUAL
+    cdi = FIXED_CDI_ANNUAL
 
     try:
         url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.432/dados/ultimos/1?formato=json"
@@ -412,15 +405,25 @@ async def get_selic_benchmark(session: aiohttp.ClientSession) -> Dict[str, float
             valor = str(data[0].get("valor", "")).replace(",", ".")
             selic_api = float(valor)
 
-            # Só aceita se fizer sentido
-            if 5.0 <= selic_api <= 20.0:
+            # Faixa deliberadamente apertada para evitar erro grotesco da API
+            if 7.0 <= selic_api <= 13.5:
                 selic = selic_api
+            else:
+                logger.warning("Selic da API ignorada por estar fora da faixa esperada: %s", selic_api)
     except Exception as e:
-        logger.warning("Falha ao buscar Selic oficial. Usando fallback: %s", e)
+        logger.warning("Falha ao buscar benchmark ao vivo. Usando fixo: %s", e)
 
-    # CDI aproximado
     cdi = round(max(selic - 0.10, 0.0), 2)
-    return sanitize_benchmark(selic, cdi)
+    return {
+        "selic_annual": round(selic, 2),
+        "cdi_annual": round(cdi, 2),
+    }
+
+
+async def get_selic_benchmark(session: aiohttp.ClientSession) -> Dict[str, float]:
+    if BENCHMARK_MODE == "live":
+        return await get_live_benchmark(session)
+    return fixed_benchmark()
 
 
 async def collect_manual_fallback() -> List[Investment]:
@@ -445,10 +448,6 @@ async def collect_manual_fallback() -> List[Investment]:
 
 
 async def collect_yubb(session: aiohttp.ClientSession) -> List[Investment]:
-    """
-    Coletor best-effort.
-    Ainda pode precisar de ajuste fino futuro.
-    """
     results: List[Investment] = []
 
     candidate_urls = [
@@ -615,10 +614,7 @@ def apply_filters(investments: List[Investment], settings: Dict[str, Any]) -> Di
 
 
 async def collect_all_sources(settings: Dict[str, Any]) -> Dict[str, Any]:
-    benchmark = {
-        "selic_annual": DEFAULT_SELIC_ANNUAL,
-        "cdi_annual": DEFAULT_CDI_ANNUAL,
-    }
+    benchmark = fixed_benchmark()
 
     all_investments: List[Investment] = []
     source_status: Dict[str, int] = {}
@@ -764,6 +760,8 @@ def status_message(cache_data: Dict[str, Any]) -> str:
     if not source_lines:
         source_lines = ["✔ Nenhuma fonte registrada"]
 
+    mode_label = "fixo" if BENCHMARK_MODE != "live" else "ao vivo"
+
     return (
         f"🟢 <b>{BOT_NAME} online</b>\n\n"
         f"Última atualização: {last_update}\n"
@@ -772,8 +770,9 @@ def status_message(cache_data: Dict[str, Any]) -> str:
         f"Isentos no cache: {len(buckets.get('isentos', []))}\n"
         f"Melhores que Selic: {len(buckets.get('selicplus', []))}\n"
         f"Ranking total: {len(buckets.get('ranking', []))}\n\n"
-        f"Benchmark Selic aproximado: {benchmark.get('selic_annual', DEFAULT_SELIC_ANNUAL):.2f}%\n"
-        f"CDI aproximado: {benchmark.get('cdi_annual', DEFAULT_CDI_ANNUAL):.2f}%\n\n"
+        f"Benchmark Selic aproximado: {benchmark.get('selic_annual', FIXED_SELIC_ANNUAL):.2f}%\n"
+        f"CDI aproximado: {benchmark.get('cdi_annual', FIXED_CDI_ANNUAL):.2f}%\n"
+        f"Modo benchmark: {mode_label}\n\n"
         "Fontes monitoradas:\n"
         + "\n".join(source_lines)
     )
@@ -781,14 +780,16 @@ def status_message(cache_data: Dict[str, Any]) -> str:
 
 def benchmark_message(cache_data: Dict[str, Any]) -> str:
     bench = cache_data.get("benchmark", {})
-    selic = float(bench.get("selic_annual", DEFAULT_SELIC_ANNUAL))
-    cdi = float(bench.get("cdi_annual", DEFAULT_CDI_ANNUAL))
+    selic = float(bench.get("selic_annual", FIXED_SELIC_ANNUAL))
+    cdi = float(bench.get("cdi_annual", FIXED_CDI_ANNUAL))
+    mode_label = "fixo" if BENCHMARK_MODE != "live" else "ao vivo"
 
     return (
         "🏦 <b>Benchmark</b>\n\n"
         "Tesouro Selic\n\n"
         f"Taxa aproximada: {selic:.2f}%\n"
-        f"CDI aproximado: {cdi:.2f}%"
+        f"CDI aproximado: {cdi:.2f}%\n"
+        f"Modo: {mode_label}"
     )
 
 
@@ -880,7 +881,6 @@ async def send_with_keyboard(update: Update, text: str) -> None:
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Sem duplicar o nome do bot
     await send_with_keyboard(update, menu_message())
 
 
@@ -1048,7 +1048,14 @@ def main() -> None:
     else:
         logger.warning("JobQueue não disponível. O radar automático ficará desativado.")
 
-    logger.info("%s iniciado. Intervalo do radar: %s minutos.", BOT_NAME, CHECK_INTERVAL_MINUTES)
+    logger.info(
+        "%s iniciado. Intervalo: %s min | Benchmark mode: %s | Selic fixa: %.2f | CDI fixo: %.2f",
+        BOT_NAME,
+        CHECK_INTERVAL_MINUTES,
+        BENCHMARK_MODE,
+        FIXED_SELIC_ANNUAL,
+        FIXED_CDI_ANNUAL,
+    )
     app.run_polling(drop_pending_updates=True)
 
 
