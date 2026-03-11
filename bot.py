@@ -28,9 +28,13 @@ from telegram.ext import (
 # CONFIG
 # =========================================================
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+BOT_NAME = "Radar de Investimentos PRO"
 
-# Aceita os dois nomes para evitar problema no Railway
+TELEGRAM_BOT_TOKEN = (
+    os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    or os.getenv("BOT_TOKEN", "").strip()
+)
+
 ALERT_CHAT_ID = (
     os.getenv("ALERT_CHAT_ID", "").strip()
     or os.getenv("CHAT_ID", "").strip()
@@ -42,6 +46,7 @@ CACHE_FILE = "radar_cache.json"
 SETTINGS_FILE = "radar_settings.json"
 SENT_ALERTS_FILE = "sent_alerts.json"
 
+# Fallbacks coerentes
 DEFAULT_SELIC_ANNUAL = 10.75
 DEFAULT_CDI_ANNUAL = 10.65
 
@@ -60,6 +65,7 @@ DEFAULT_SETTINGS = {
     "max_items_per_command": 10,
 }
 
+# Fallback local para o radar não ficar “morto”
 MANUAL_FALLBACK_OFFERS = [
     {
         "source": "manual_fallback",
@@ -106,7 +112,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("radar_investimentos_pro_plus")
+logger = logging.getLogger("radar_investimentos_pro")
 
 
 # =========================================================
@@ -138,7 +144,7 @@ class Investment:
 
 
 # =========================================================
-# JSON / ARQUIVOS
+# ARQUIVOS JSON
 # =========================================================
 
 def load_json_file(path: str, default: Any) -> Any:
@@ -160,11 +166,27 @@ def save_json_file(path: str, data: Any) -> None:
         logger.exception("Falha ao salvar %s: %s", path, e)
 
 
+def ensure_files() -> None:
+    if not os.path.exists(SETTINGS_FILE):
+        save_json_file(SETTINGS_FILE, DEFAULT_SETTINGS)
+
+    if not os.path.exists(CACHE_FILE):
+        save_json_file(CACHE_FILE, {
+            "last_update": None,
+            "benchmark": {},
+            "offers": [],
+            "buckets": {},
+            "source_status": {},
+        })
+
+    if not os.path.exists(SENT_ALERTS_FILE):
+        save_json_file(SENT_ALERTS_FILE, [])
+
+
 def load_settings() -> Dict[str, Any]:
     settings = load_json_file(SETTINGS_FILE, DEFAULT_SETTINGS)
 
     merged = DEFAULT_SETTINGS.copy()
-
     merged["filters"] = DEFAULT_SETTINGS["filters"].copy()
     merged["filters"].update(settings.get("filters", {}))
 
@@ -173,7 +195,6 @@ def load_settings() -> Dict[str, Any]:
 
     merged["alert_only_new"] = settings.get("alert_only_new", DEFAULT_SETTINGS["alert_only_new"])
     merged["max_items_per_command"] = settings.get("max_items_per_command", DEFAULT_SETTINGS["max_items_per_command"])
-
     return merged
 
 
@@ -199,23 +220,6 @@ def save_sent_alerts(alerts: List[str]) -> None:
     save_json_file(SENT_ALERTS_FILE, alerts)
 
 
-def ensure_files() -> None:
-    if not os.path.exists(SETTINGS_FILE):
-        save_json_file(SETTINGS_FILE, DEFAULT_SETTINGS)
-
-    if not os.path.exists(CACHE_FILE):
-        save_json_file(CACHE_FILE, {
-            "last_update": None,
-            "benchmark": {},
-            "offers": [],
-            "buckets": {},
-            "source_status": {},
-        })
-
-    if not os.path.exists(SENT_ALERTS_FILE):
-        save_json_file(SENT_ALERTS_FILE, [])
-
-
 # =========================================================
 # CÁLCULOS
 # =========================================================
@@ -235,10 +239,8 @@ def estimate_gross_annual_return(rate_type: str, rate_value: float, cdi_annual: 
 
     if rt == "CDI":
         return (rate_value / 100.0) * cdi_annual
-
     if rt == "PRE":
         return rate_value
-
     if rt == "IPCA":
         assumed_ipca = 4.5
         return assumed_ipca + rate_value
@@ -246,7 +248,13 @@ def estimate_gross_annual_return(rate_type: str, rate_value: float, cdi_annual: 
     return 0.0
 
 
-def estimate_net_annual_return(product_type: str, rate_type: str, rate_value: float, cdi_annual: float, term_days: int) -> float:
+def estimate_net_annual_return(
+    product_type: str,
+    rate_type: str,
+    rate_value: float,
+    cdi_annual: float,
+    term_days: int,
+) -> float:
     gross = estimate_gross_annual_return(rate_type, rate_value, cdi_annual)
 
     if product_type.upper() in ("LCI", "LCA"):
@@ -261,10 +269,8 @@ def classify_category(inv: Investment) -> str:
 
     if pt in ("LCI", "LCA"):
         return "isentos"
-
     if pt == "CDB" and inv.liquidity_daily:
         return "diarios"
-
     if pt == "CDB" and 0 < inv.term_days <= 540:
         return "curtos"
 
@@ -371,7 +377,31 @@ async def fetch_text(session: aiohttp.ClientSession, url: str, timeout: int = 20
         return await resp.text()
 
 
+def sanitize_benchmark(selic: float, cdi: float) -> Dict[str, float]:
+    """
+    Evita benchmark estranho vindo de API.
+    Se vier algo fora de uma faixa plausível, usa fallback.
+    """
+    if not (5.0 <= selic <= 20.0):
+        selic = DEFAULT_SELIC_ANNUAL
+
+    if not (4.5 <= cdi <= 19.5):
+        cdi = DEFAULT_CDI_ANNUAL
+
+    # Mantém CDI levemente abaixo da Selic, se necessário
+    if cdi > selic:
+        cdi = round(max(selic - 0.10, 0.0), 2)
+
+    return {
+        "selic_annual": round(selic, 2),
+        "cdi_annual": round(cdi, 2),
+    }
+
+
 async def get_selic_benchmark(session: aiohttp.ClientSession) -> Dict[str, float]:
+    """
+    Busca benchmark com fallback seguro.
+    """
     selic = DEFAULT_SELIC_ANNUAL
     cdi = DEFAULT_CDI_ANNUAL
 
@@ -380,16 +410,17 @@ async def get_selic_benchmark(session: aiohttp.ClientSession) -> Dict[str, float
         data = await fetch_json(session, url)
         if data and isinstance(data, list):
             valor = str(data[0].get("valor", "")).replace(",", ".")
-            selic = float(valor)
+            selic_api = float(valor)
+
+            # Só aceita se fizer sentido
+            if 5.0 <= selic_api <= 20.0:
+                selic = selic_api
     except Exception as e:
         logger.warning("Falha ao buscar Selic oficial. Usando fallback: %s", e)
 
+    # CDI aproximado
     cdi = round(max(selic - 0.10, 0.0), 2)
-
-    return {
-        "selic_annual": selic,
-        "cdi_annual": cdi,
-    }
+    return sanitize_benchmark(selic, cdi)
 
 
 async def collect_manual_fallback() -> List[Investment]:
@@ -414,6 +445,10 @@ async def collect_manual_fallback() -> List[Investment]:
 
 
 async def collect_yubb(session: aiohttp.ClientSession) -> List[Investment]:
+    """
+    Coletor best-effort.
+    Ainda pode precisar de ajuste fino futuro.
+    """
     results: List[Investment] = []
 
     candidate_urls = [
@@ -702,7 +737,7 @@ def render_list(title: str, items: List[Dict[str, Any]], max_items: int = 10) ->
 
 def menu_message() -> str:
     return (
-        "💰 <b>Radar de Investimentos PRO+</b>\n\n"
+        f"💰 <b>{BOT_NAME}</b>\n\n"
         "/menu - abrir menu\n"
         "/status - status do radar\n"
         "/ranking - ranking geral de oportunidades\n"
@@ -730,7 +765,7 @@ def status_message(cache_data: Dict[str, Any]) -> str:
         source_lines = ["✔ Nenhuma fonte registrada"]
 
     return (
-        "🟢 <b>Radar online</b>\n\n"
+        f"🟢 <b>{BOT_NAME} online</b>\n\n"
         f"Última atualização: {last_update}\n"
         f"Diários no cache: {len(buckets.get('diarios', []))}\n"
         f"Curtos no cache: {len(buckets.get('curtos', []))}\n"
@@ -845,7 +880,8 @@ async def send_with_keyboard(update: Update, text: str) -> None:
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await send_with_keyboard(update, "💰 <b>Radar de Investimentos PRO+</b>\n\n" + menu_message())
+    # Sem duplicar o nome do bot
+    await send_with_keyboard(update, menu_message())
 
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -982,7 +1018,7 @@ async def on_startup(app: Application) -> None:
 
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
-        raise ValueError("Defina TELEGRAM_BOT_TOKEN nas variáveis do Railway.")
+        raise ValueError("Defina TELEGRAM_BOT_TOKEN ou BOT_TOKEN nas variáveis do Railway.")
 
     ensure_files()
 
@@ -1012,7 +1048,7 @@ def main() -> None:
     else:
         logger.warning("JobQueue não disponível. O radar automático ficará desativado.")
 
-    logger.info("Bot iniciado. Intervalo do radar: %s minutos.", CHECK_INTERVAL_MINUTES)
+    logger.info("%s iniciado. Intervalo do radar: %s minutos.", BOT_NAME, CHECK_INTERVAL_MINUTES)
     app.run_polling(drop_pending_updates=True)
 
 
