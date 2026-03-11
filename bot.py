@@ -44,10 +44,17 @@ ALERT_CHAT_ID = (
 
 CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "5"))
 
-# Mantemos benchmark fixo para deixar o radar estável
+# Benchmark fixo para estabilidade
 BENCHMARK_MODE = os.getenv("BENCHMARK_MODE", "fixed").strip().lower()
 FIXED_SELIC_ANNUAL = float(os.getenv("FIXED_SELIC_ANNUAL", "10.75"))
 FIXED_CDI_ANNUAL = float(os.getenv("FIXED_CDI_ANNUAL", "10.65"))
+
+# URLs públicas extras opcionais, separadas por vírgula
+# Exemplo:
+# PUBLIC_SOURCE_URLS=https://site1.com/renda-fixa,https://site2.com/investimentos
+PUBLIC_SOURCE_URLS = [
+    u.strip() for u in os.getenv("PUBLIC_SOURCE_URLS", "").split(",") if u.strip()
+]
 
 CACHE_FILE = "radar_cache.json"
 SETTINGS_FILE = "radar_settings.json"
@@ -62,17 +69,18 @@ DEFAULT_SETTINGS = {
     },
     "sources_enabled": {
         "yubb": True,
+        "public_pages": True,
         "manual_fallback": True,
     },
     "alert_only_new": True,
     "max_items_per_command": 10,
 }
 
-# Fallback genérico para não confundir com oferta real de banco específico
+# Fallback claramente identificado como simulação interna
 MANUAL_FALLBACK_OFFERS = [
     {
-        "source": "manual_fallback",
-        "institution": "Instituição Exemplo",
+        "source": "fallback_simulado",
+        "institution": "Simulação Interna",
         "product_name": "CDB Liquidez Diária Exemplo",
         "product_type": "CDB",
         "rate_type": "CDI",
@@ -84,8 +92,8 @@ MANUAL_FALLBACK_OFFERS = [
         "url": "",
     },
     {
-        "source": "manual_fallback",
-        "institution": "Emissor Exemplo",
+        "source": "fallback_simulado",
+        "institution": "Simulação Interna",
         "product_name": "CDB Prazo Curto Exemplo",
         "product_type": "CDB",
         "rate_type": "CDI",
@@ -97,8 +105,8 @@ MANUAL_FALLBACK_OFFERS = [
         "url": "",
     },
     {
-        "source": "manual_fallback",
-        "institution": "Banco Exemplo",
+        "source": "fallback_simulado",
+        "institution": "Simulação Interna",
         "product_name": "LCI Exemplo",
         "product_type": "LCI",
         "rate_type": "CDI",
@@ -147,7 +155,7 @@ class Investment:
 
 
 # =========================================================
-# ARQUIVOS JSON
+# JSON / ARQUIVOS
 # =========================================================
 
 def load_json_file(path: str, default: Any) -> Any:
@@ -298,7 +306,6 @@ def build_unique_id(inv: Investment) -> str:
 def calculate_score(inv: Investment, selic_annual: float) -> float:
     score = 0.0
 
-    # Peso principal da taxa mais agressivo do que antes
     if inv.rate_type.upper() == "CDI":
         if inv.product_type.upper() in ("LCI", "LCA"):
             if inv.rate_value >= 97:
@@ -313,17 +320,17 @@ def calculate_score(inv: Investment, selic_annual: float) -> float:
                 score += 2.0
         else:
             if inv.rate_value >= 120:
-                score += 5.4
+                score += 5.5
             elif inv.rate_value >= 115:
-                score += 4.8
+                score += 5.0
             elif inv.rate_value >= 110:
-                score += 4.2
+                score += 4.4
             elif inv.rate_value >= 108:
-                score += 3.7
+                score += 3.8
             elif inv.rate_value >= 105:
-                score += 3.1
+                score += 3.2
             elif inv.rate_value >= 102:
-                score += 2.4
+                score += 2.5
             else:
                 score += 1.5
 
@@ -351,7 +358,6 @@ def calculate_score(inv: Investment, selic_annual: float) -> float:
     if inv.beats_selic:
         score += 1.6
 
-    # Ajuste por retorno líquido
     if inv.net_annual_return >= selic_annual + 1.0:
         score += 1.2
     elif inv.net_annual_return >= selic_annual:
@@ -373,20 +379,8 @@ def score_to_classification(score: float) -> str:
 
 
 # =========================================================
-# FONTES / BENCHMARK
+# BENCHMARK
 # =========================================================
-
-async def fetch_json(session: aiohttp.ClientSession, url: str, timeout: int = 20) -> Any:
-    async with session.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}) as resp:
-        resp.raise_for_status()
-        return await resp.json()
-
-
-async def fetch_text(session: aiohttp.ClientSession, url: str, timeout: int = 20) -> str:
-    async with session.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}) as resp:
-        resp.raise_for_status()
-        return await resp.text()
-
 
 def fixed_benchmark() -> Dict[str, float]:
     selic = round(FIXED_SELIC_ANNUAL, 2)
@@ -401,8 +395,13 @@ def fixed_benchmark() -> Dict[str, float]:
     }
 
 
+async def fetch_json(session: aiohttp.ClientSession, url: str, timeout: int = 20) -> Any:
+    async with session.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+        resp.raise_for_status()
+        return await resp.json()
+
+
 async def get_selic_benchmark(session: aiohttp.ClientSession) -> Dict[str, float]:
-    # Mantemos fixo por padrão
     if BENCHMARK_MODE != "live":
         return fixed_benchmark()
 
@@ -415,8 +414,6 @@ async def get_selic_benchmark(session: aiohttp.ClientSession) -> Dict[str, float
             selic_api = float(valor)
             if 7.0 <= selic_api <= 13.5:
                 selic = selic_api
-            else:
-                logger.warning("Selic da API ignorada por faixa: %s", selic_api)
     except Exception as e:
         logger.warning("Falha no benchmark ao vivo. Mantendo fixo: %s", e)
 
@@ -424,8 +421,214 @@ async def get_selic_benchmark(session: aiohttp.ClientSession) -> Dict[str, float
     return {"selic_annual": round(selic, 2), "cdi_annual": round(cdi, 2)}
 
 
+# =========================================================
+# PARSERS / HELPERS
+# =========================================================
+
+def normalize_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(text or "")).strip()
+
+
+def infer_product_type(text: str) -> Optional[str]:
+    low = text.lower()
+    if "lci" in low:
+        return "LCI"
+    if "lca" in low:
+        return "LCA"
+    if "cdb" in low:
+        return "CDB"
+    return None
+
+
+def infer_rate_value(text: str) -> Optional[float]:
+    low = text.lower()
+
+    patterns = [
+        r"(\d{2,3}(?:[\.,]\d{1,2})?)\s*%\s*(?:do\s*)?cdi",
+        r"(\d{2,3}(?:[\.,]\d{1,2})?)\s*%",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, low)
+        if m:
+            raw = m.group(1).replace(".", "").replace(",", ".")
+            try:
+                val = float(raw)
+                if 70 <= val <= 200:
+                    return val
+            except Exception:
+                pass
+    return None
+
+
+def infer_liquidity_daily(text: str) -> bool:
+    low = text.lower()
+    return "liquidez diária" in low or "liquidez diaria" in low
+
+
+def infer_term_days(text: str) -> int:
+    low = text.lower()
+
+    m = re.search(r"(\d{1,2})\s*mes(?:es)?", low)
+    if m:
+        return int(m.group(1)) * 30
+
+    y = re.search(r"(\d{1,2})\s*ano(?:s)?", low)
+    if y:
+        return int(y.group(1)) * 365
+
+    d = re.search(r"(\d{2,4})\s*dias?", low)
+    if d:
+        return int(d.group(1))
+
+    if infer_liquidity_daily(text):
+        return 1
+
+    return 365
+
+
+def infer_minimum_investment(text: str) -> float:
+    low = text.lower()
+    patterns = [
+        r"r\$\s*([\d\.\,]+)",
+        r"m[ií]nimo(?: de aplica[cç][aã]o)?\s*[:\-]?\s*([\d\.\,]+)",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, low)
+        if m:
+            val = m.group(1).replace(".", "").replace(",", ".")
+            try:
+                return float(val)
+            except Exception:
+                pass
+
+    return 1000.0
+
+
+KNOWN_BANKS = [
+    "Banco Inter", "Inter",
+    "BTG Pactual", "BTG",
+    "XP Investimentos", "XP",
+    "Rico", "Órama", "Orama",
+    "Genial", "Banco Daycoval", "Daycoval",
+    "Banco Sofisa", "Sofisa",
+    "Banco Pan", "Pan",
+    "Mercado Pago", "Itaú", "Itau",
+    "Bradesco", "Santander", "Caixa",
+    "PicPay", "PagBank", "Banco BMG", "BMG",
+    "Neon", "Banco BV", "BV", "Banrisul",
+]
+
+def infer_institution(text: str, default_name: str = "Instituição não identificada") -> str:
+    clean = normalize_spaces(text)
+    low = clean.lower()
+
+    for bank in KNOWN_BANKS:
+        if bank.lower() in low:
+            return bank
+
+    patterns = [
+        r"(?:emissor|institui[cç][aã]o|banco)\s*[:\-]?\s*([A-Za-zÀ-ÿ0-9&\.\-\s]{3,50})",
+        r"(Banco\s+[A-Za-zÀ-ÿ0-9&\.\-\s]{2,40})",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, clean, flags=re.IGNORECASE)
+        if m:
+            candidate = normalize_spaces(m.group(1))
+            if 3 <= len(candidate) <= 50:
+                return candidate
+
+    return default_name
+
+
+def build_product_name(product_type: str, institution: str, liquidity_daily: bool, term_days: int) -> str:
+    if product_type == "CDB" and liquidity_daily:
+        return f"CDB {institution} Liquidez Diária"
+    if product_type == "CDB" and term_days <= 540:
+        return f"CDB {institution} Prazo Curto"
+    return f"{product_type} {institution}"
+
+
+def parse_candidate_block(text: str, url: str, source_name: str) -> Optional[Investment]:
+    clean = normalize_spaces(text)
+    if len(clean) < 20:
+        return None
+
+    product_type = infer_product_type(clean)
+    if not product_type:
+        return None
+
+    rate_value = infer_rate_value(clean)
+    if rate_value is None:
+        return None
+
+    liquidity_daily = infer_liquidity_daily(clean)
+    term_days = infer_term_days(clean)
+    minimum_investment = infer_minimum_investment(clean)
+    institution = infer_institution(clean, default_name="Instituição não identificada")
+    product_name = build_product_name(product_type, institution, liquidity_daily, term_days)
+
+    return Investment(
+        source=source_name,
+        institution=institution,
+        product_name=product_name,
+        product_type=product_type,
+        rate_type="CDI",
+        rate_value=float(rate_value),
+        liquidity_daily=liquidity_daily,
+        term_days=term_days,
+        minimum_investment=minimum_investment,
+        fgc=True,
+        url=url,
+    )
+
+
+async def fetch_text(session: aiohttp.ClientSession, url: str, timeout: int = 20) -> str:
+    async with session.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+        resp.raise_for_status()
+        return await resp.text()
+
+
+def extract_candidate_texts_from_html(html_text: str) -> List[str]:
+    soup = BeautifulSoup(html_text, "html.parser")
+    candidates: List[str] = []
+
+    for block in soup.find_all(["div", "article", "section", "li", "span", "p"]):
+        txt = normalize_spaces(block.get_text(" ", strip=True))
+        low = txt.lower()
+        if any(x in low for x in ["cdb", "lci", "lca"]) and "%" in low:
+            candidates.append(txt)
+
+    for script in soup.find_all("script"):
+        raw = normalize_spaces(script.get_text(" ", strip=True))
+        low = raw.lower()
+        if any(x in low for x in ["cdb", "lci", "lca"]) and "%" in low:
+            chunks = re.split(r"[{}\[\]\n\r;]+", raw)
+            for chunk in chunks:
+                c = normalize_spaces(chunk)
+                cl = c.lower()
+                if any(x in cl for x in ["cdb", "lci", "lca"]) and "%" in cl:
+                    candidates.append(c)
+
+    full_text = normalize_spaces(soup.get_text(" ", strip=True))
+    windows = re.findall(
+        r"(.{0,80}(?:cdb|lci|lca).{0,200})",
+        full_text,
+        flags=re.IGNORECASE,
+    )
+    candidates.extend(windows)
+
+    return candidates
+
+
+# =========================================================
+# COLETORES
+# =========================================================
+
 async def collect_manual_fallback() -> List[Investment]:
-    items = []
+    items: List[Investment] = []
     for item in MANUAL_FALLBACK_OFFERS:
         items.append(
             Investment(
@@ -445,141 +648,8 @@ async def collect_manual_fallback() -> List[Investment]:
     return items
 
 
-def normalize_spaces(text: str) -> str:
-    return re.sub(r"\s+", " ", html.unescape(text or "")).strip()
-
-
-def infer_term_days(text: str) -> int:
-    low = text.lower()
-
-    # 1º padrões em meses
-    m = re.search(r"(\d{1,2})\s*mes(?:es)?", low)
-    if m:
-        return int(m.group(1)) * 30
-
-    # anos
-    y = re.search(r"(\d{1,2})\s*ano(?:s)?", low)
-    if y:
-        return int(y.group(1)) * 365
-
-    # dias
-    d = re.search(r"(\d{2,4})\s*dias?", low)
-    if d:
-        return int(d.group(1))
-
-    if "liquidez diária" in low or "liquidez diaria" in low:
-        return 1
-
-    return 365
-
-
-def infer_minimum_investment(text: str) -> float:
-    low = text.lower()
-
-    # tenta R$ 1.000,00 / r$1000 / mínimo 100 etc
-    patterns = [
-        r"r\$\s*([\d\.\,]+)",
-        r"m[ií]nimo(?: de aplica[cç][aã]o)?\s*[:\-]?\s*([\d\.\,]+)",
-    ]
-
-    for pattern in patterns:
-        m = re.search(pattern, low)
-        if m:
-            val = m.group(1).replace(".", "").replace(",", ".")
-            try:
-                return float(val)
-            except Exception:
-                pass
-
-    return 1000.0
-
-
-def infer_product_type(text: str) -> Optional[str]:
-    low = text.lower()
-    if "lci" in low:
-        return "LCI"
-    if "lca" in low:
-        return "LCA"
-    if "cdb" in low:
-        return "CDB"
-    return None
-
-
-def infer_rate_value(text: str) -> Optional[float]:
-    low = text.lower()
-
-    # padrões tipo 110% do cdi / 110% cdi / 110,5%
-    patterns = [
-        r"(\d{2,3}(?:[\.,]\d{1,2})?)\s*%\s*(?:do\s*)?cdi",
-        r"(\d{2,3}(?:[\.,]\d{1,2})?)\s*%",
-    ]
-
-    for pattern in patterns:
-        m = re.search(pattern, low)
-        if m:
-            raw = m.group(1).replace(".", "").replace(",", ".")
-            try:
-                num = float(raw)
-                if 70 <= num <= 200:
-                    return num
-            except Exception:
-                pass
-    return None
-
-
-def infer_liquidity_daily(text: str) -> bool:
-    low = text.lower()
-    return "liquidez diária" in low or "liquidez diaria" in low
-
-
-def parse_candidate_block(text: str, url: str) -> Optional[Investment]:
-    clean = normalize_spaces(text)
-    if len(clean) < 20:
-        return None
-
-    product_type = infer_product_type(clean)
-    if not product_type:
-        return None
-
-    rate_value = infer_rate_value(clean)
-    if rate_value is None:
-        return None
-
-    liquidity_daily = infer_liquidity_daily(clean)
-    term_days = infer_term_days(clean)
-    minimum_investment = infer_minimum_investment(clean)
-
-    # nome um pouco melhor do que "encontrado no Yubb"
-    name = f"{product_type} Yubb"
-    if liquidity_daily and product_type == "CDB":
-        name = "CDB Yubb Liquidez Diária"
-    elif product_type == "CDB" and term_days <= 540:
-        name = "CDB Yubb Prazo Curto"
-
-    return Investment(
-        source="yubb",
-        institution="Yubb",
-        product_name=name,
-        product_type=product_type,
-        rate_type="CDI",
-        rate_value=float(rate_value),
-        liquidity_daily=liquidity_daily,
-        term_days=term_days,
-        minimum_investment=minimum_investment,
-        fgc=True,
-        url=url,
-    )
-
-
 async def collect_yubb(session: aiohttp.ClientSession) -> List[Investment]:
-    """
-    Coletor mais tolerante:
-    - analisa blocos HTML
-    - analisa script/json embutido
-    - usa regex sobre trechos com CDB/LCI/LCA
-    """
     results: List[Investment] = []
-
     candidate_urls = [
         "https://yubb.com.br/investimentos/renda-fixa",
         "https://yubb.com.br",
@@ -588,57 +658,50 @@ async def collect_yubb(session: aiohttp.ClientSession) -> List[Investment]:
     for url in candidate_urls:
         try:
             html_text = await fetch_text(session, url, timeout=20)
-            soup = BeautifulSoup(html_text, "html.parser")
-
-            candidates: List[str] = []
-
-            # 1) blocos visuais
-            for block in soup.find_all(["div", "article", "section", "li"]):
-                txt = normalize_spaces(block.get_text(" ", strip=True))
-                low = txt.lower()
-                if any(x in low for x in ["cdb", "lci", "lca"]) and "%" in low:
-                    candidates.append(txt)
-
-            # 2) scripts / json embutido
-            for script in soup.find_all("script"):
-                raw = normalize_spaces(script.get_text(" ", strip=True))
-                low = raw.lower()
-                if any(x in low for x in ["cdb", "lci", "lca"]) and "%" in low:
-                    # quebra em trechos menores para facilitar
-                    chunks = re.split(r"[{}\[\]\n\r;]+", raw)
-                    for chunk in chunks:
-                        c = normalize_spaces(chunk)
-                        cl = c.lower()
-                        if any(x in cl for x in ["cdb", "lci", "lca"]) and "%" in cl:
-                            candidates.append(c)
-
-            # 3) regex em torno de palavras-chave na página inteira
-            full_text = normalize_spaces(soup.get_text(" ", strip=True))
-            full_low = full_text.lower()
-            if any(x in full_low for x in ["cdb", "lci", "lca"]):
-                windows = re.findall(
-                    r"(.{0,80}(?:cdb|lci|lca).{0,160})",
-                    full_text,
-                    flags=re.IGNORECASE,
-                )
-                candidates.extend(windows)
+            candidates = extract_candidate_texts_from_html(html_text)
 
             parsed_count = 0
             for cand in candidates:
-                inv = parse_candidate_block(cand, url)
+                inv = parse_candidate_block(cand, url, "yubb")
                 if inv:
                     results.append(inv)
                     parsed_count += 1
-                if parsed_count >= 20:
+                if parsed_count >= 25:
                     break
 
             if results:
                 break
-
         except Exception as e:
             logger.warning("Falha ao coletar Yubb em %s: %s", url, e)
 
     return results
+
+
+async def collect_public_pages(session: aiohttp.ClientSession) -> Tuple[List[Investment], Dict[str, int]]:
+    results: List[Investment] = []
+    status: Dict[str, int] = {}
+
+    for url in PUBLIC_SOURCE_URLS:
+        source_name = re.sub(r"^https?://", "", url).split("/")[0].lower()
+        try:
+            html_text = await fetch_text(session, url, timeout=20)
+            candidates = extract_candidate_texts_from_html(html_text)
+
+            found = 0
+            for cand in candidates:
+                inv = parse_candidate_block(cand, url, source_name)
+                if inv:
+                    results.append(inv)
+                    found += 1
+                if found >= 25:
+                    break
+
+            status[source_name] = found
+        except Exception as e:
+            logger.warning("Falha ao coletar fonte pública %s: %s", url, e)
+            status[source_name] = 0
+
+    return results, status
 
 
 # =========================================================
@@ -736,16 +799,24 @@ async def collect_all_sources(settings: Dict[str, Any]) -> Dict[str, Any]:
         else:
             source_status["Yubb"] = 0
 
+        if settings["sources_enabled"].get("public_pages", False):
+            try:
+                public_items, public_status = await collect_public_pages(session)
+                all_investments.extend(public_items)
+                source_status.update(public_status)
+            except Exception as e:
+                logger.warning("Erro nas fontes públicas: %s", e)
+
     if settings["sources_enabled"].get("manual_fallback", False):
         try:
             manual_items = await collect_manual_fallback()
             all_investments.extend(manual_items)
-            source_status["Fallback manual"] = len(manual_items)
+            source_status["Fallback simulado"] = len(manual_items)
         except Exception as e:
             logger.warning("Erro no fallback manual: %s", e)
-            source_status["Fallback manual"] = 0
+            source_status["Fallback simulado"] = 0
     else:
-        source_status["Fallback manual"] = 0
+        source_status["Fallback simulado"] = 0
 
     all_investments = enrich_investments(all_investments, benchmark)
     all_investments = deduplicate_investments(all_investments)
@@ -793,7 +864,14 @@ def format_item(inv: Dict[str, Any], show_url: bool = False, rank_position: Opti
     else:
         prefix = f"{rank_position}. "
 
-    lines = [
+    source = inv.get("source", "-")
+    is_simulated = str(source).lower() == "fallback_simulado"
+
+    lines = []
+    if is_simulated:
+        lines.append("🧪 <b>Dado de exemplo</b>")
+
+    lines.extend([
         f"{prefix}<b>{inv.get('product_name', 'Produto')}</b>",
         f"🏦 Instituição: {inv.get('institution', '-')}",
         f"📦 Tipo: {inv.get('product_type', '-')}",
@@ -807,8 +885,8 @@ def format_item(inv: Dict[str, Any], show_url: bool = False, rank_position: Opti
         f"📊 Score: {float(inv.get('score', 0)):.1f}",
         f"{inv.get('classification', '⚪ OPORTUNIDADE PADRÃO')}",
         f"{'✅ Melhor que o Tesouro Selic' if inv.get('beats_selic') else '➖ Não supera o Tesouro Selic'}",
-        f"🌐 Fonte: {inv.get('source', '-')}",
-    ]
+        f"🌐 Fonte: {source}",
+    ])
 
     url = str(inv.get("url", "")).strip()
     if show_url and url:
@@ -853,15 +931,13 @@ def status_message(cache_data: Dict[str, Any]) -> str:
     benchmark = cache_data.get("benchmark", {})
     source_status = cache_data.get("source_status", {})
     last_update = cache_data.get("last_update", "Nunca")
+    mode_label = "fixo" if BENCHMARK_MODE != "live" else "ao vivo"
 
     source_lines = []
     for name, count in source_status.items():
         source_lines.append(f"✔ {name}: {count}")
-
     if not source_lines:
         source_lines = ["✔ Nenhuma fonte registrada"]
-
-    mode_label = "fixo" if BENCHMARK_MODE != "live" else "ao vivo"
 
     return (
         f"🟢 <b>{BOT_NAME} online</b>\n\n"
@@ -925,7 +1001,13 @@ async def send_new_alerts(application: Application, cache_data: Dict[str, Any]) 
 
     sent_alerts = set(load_sent_alerts())
     ranking = cache_data.get("buckets", {}).get("ranking", [])
-    candidates = [x for x in ranking if float(x.get("score", 0)) >= min_score]
+
+    # não alerta fallback simulado
+    candidates = [
+        x for x in ranking
+        if float(x.get("score", 0)) >= min_score
+        and str(x.get("source", "")).lower() != "fallback_simulado"
+    ]
 
     updated_sent = set(sent_alerts)
 
@@ -1042,7 +1124,6 @@ async def cmd_selicplus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def cmd_atualizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Mensagens mais profissionais
     progress_msg = await update.message.reply_text(
         "🔎 Buscando oportunidades...\n📡 Consultando fontes...\n📊 Calculando ranking...",
         parse_mode=ParseMode.HTML,
@@ -1168,12 +1249,13 @@ def main() -> None:
         logger.warning("JobQueue não disponível. O radar automático ficará desativado.")
 
     logger.info(
-        "%s iniciado. Intervalo: %s min | Benchmark mode: %s | Selic fixa: %.2f | CDI fixo: %.2f",
+        "%s iniciado. Intervalo: %s min | Benchmark mode: %s | Selic fixa: %.2f | CDI fixo: %.2f | Fontes públicas extras: %s",
         BOT_NAME,
         CHECK_INTERVAL_MINUTES,
         BENCHMARK_MODE,
         FIXED_SELIC_ANNUAL,
         FIXED_CDI_ANNUAL,
+        len(PUBLIC_SOURCE_URLS),
     )
     app.run_polling(drop_pending_updates=True)
 
