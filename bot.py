@@ -1,6 +1,5 @@
 import os
 import json
-import asyncio
 import logging
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
@@ -21,14 +20,22 @@ from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 # =========================================================
 # CONFIG
 # =========================================================
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "COLOQUE_SEU_TOKEN_AQUI")
-ALERT_CHAT_ID = os.getenv("ALERT_CHAT_ID", "")  # grupo, canal ou chat pessoal
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+
+# Aceita os dois nomes para evitar problema no Railway
+ALERT_CHAT_ID = (
+    os.getenv("ALERT_CHAT_ID", "").strip()
+    or os.getenv("CHAT_ID", "").strip()
+)
+
 CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "5"))
 
 CACHE_FILE = "radar_cache.json"
@@ -53,8 +60,6 @@ DEFAULT_SETTINGS = {
     "max_items_per_command": 10,
 }
 
-# Fallback local para o radar nunca ficar morto enquanto
-# você melhora os scrapers/fontes reais.
 MANUAL_FALLBACK_OFFERS = [
     {
         "source": "manual_fallback",
@@ -284,7 +289,6 @@ def build_unique_id(inv: Investment) -> str:
 def calculate_score(inv: Investment, selic_annual: float) -> float:
     score = 0.0
 
-    # Peso principal: taxa
     if inv.rate_type.upper() == "CDI":
         if inv.product_type.upper() in ("LCI", "LCA"):
             if inv.rate_value >= 95:
@@ -309,11 +313,9 @@ def calculate_score(inv: Investment, selic_annual: float) -> float:
             else:
                 score += 1.2
 
-    # Liquidez
     if inv.liquidity_daily:
         score += 1.4
 
-    # Prazo
     if inv.term_days > 0:
         if inv.term_days <= 365:
             score += 1.2
@@ -322,7 +324,6 @@ def calculate_score(inv: Investment, selic_annual: float) -> float:
         else:
             score += 0.4
 
-    # Aplicação mínima
     if inv.minimum_investment <= 100:
         score += 0.9
     elif inv.minimum_investment <= 1000:
@@ -330,15 +331,12 @@ def calculate_score(inv: Investment, selic_annual: float) -> float:
     else:
         score += 0.3
 
-    # FGC
     if inv.fgc:
         score += 0.8
 
-    # Melhor que Selic
     if inv.beats_selic:
         score += 1.6
 
-    # Ganho líquido acima da Selic
     if inv.net_annual_return >= selic_annual + 1.0:
         score += 1.2
     elif inv.net_annual_return >= selic_annual:
@@ -416,10 +414,6 @@ async def collect_manual_fallback() -> List[Investment]:
 
 
 async def collect_yubb(session: aiohttp.ClientSession) -> List[Investment]:
-    """
-    Coletor best-effort.
-    Pode exigir ajustes futuros se a estrutura do site mudar.
-    """
     results: List[Investment] = []
 
     candidate_urls = [
@@ -547,27 +541,27 @@ def deduplicate_investments(investments: List[Investment]) -> List[Investment]:
 
 
 def apply_filters(investments: List[Investment], settings: Dict[str, Any]) -> Dict[str, List[Investment]]:
-    filters = settings["filters"]
+    filters_cfg = settings["filters"]
 
     diarios = [
         i for i in investments
         if i.category == "diarios"
         and i.rate_type.upper() == "CDI"
-        and i.rate_value >= filters["daily_min_cdi"]
+        and i.rate_value >= filters_cfg["daily_min_cdi"]
     ]
 
     curtos = [
         i for i in investments
         if i.category == "curtos"
         and i.rate_type.upper() == "CDI"
-        and i.rate_value >= filters["short_min_cdi"]
+        and i.rate_value >= filters_cfg["short_min_cdi"]
     ]
 
     isentos = [
         i for i in investments
         if i.category == "isentos"
         and i.rate_type.upper() == "CDI"
-        and i.rate_value >= filters["isentos_min_cdi"]
+        and i.rate_value >= filters_cfg["isentos_min_cdi"]
     ]
 
     selicplus = [i for i in investments if i.beats_selic]
@@ -785,7 +779,7 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
 
 async def send_new_alerts(application: Application, cache_data: Dict[str, Any]) -> None:
     if not ALERT_CHAT_ID:
-        logger.info("ALERT_CHAT_ID não configurado. Alertas automáticos desativados.")
+        logger.info("CHAT_ID / ALERT_CHAT_ID não configurado. Alertas automáticos desativados.")
         return
 
     settings = load_settings()
@@ -922,7 +916,7 @@ async def cmd_atualizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # =========================================================
-# BOTÕES DO TECLADO
+# BOTÕES DE TEXTO
 # =========================================================
 
 async def handle_text_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -987,13 +981,12 @@ async def on_startup(app: Application) -> None:
 # =========================================================
 
 def main() -> None:
-    if TELEGRAM_BOT_TOKEN == "COLOQUE_SEU_TOKEN_AQUI":
-        raise ValueError("Defina o TELEGRAM_BOT_TOKEN no ambiente ou no código.")
+    if not TELEGRAM_BOT_TOKEN:
+        raise ValueError("Defina TELEGRAM_BOT_TOKEN nas variáveis do Railway.")
 
     ensure_files()
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
     app.post_init = on_startup
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -1007,16 +1000,17 @@ def main() -> None:
     app.add_handler(CommandHandler("benchmark", cmd_benchmark))
     app.add_handler(CommandHandler("selicplus", cmd_selicplus))
     app.add_handler(CommandHandler("atualizar", cmd_atualizar))
-
-    from telegram.ext import MessageHandler, filters
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_buttons))
 
-    app.job_queue.run_repeating(
-        radar_job,
-        interval=CHECK_INTERVAL_MINUTES * 60,
-        first=15,
-        name="radar_job",
-    )
+    if app.job_queue is not None:
+        app.job_queue.run_repeating(
+            radar_job,
+            interval=CHECK_INTERVAL_MINUTES * 60,
+            first=15,
+            name="radar_job",
+        )
+    else:
+        logger.warning("JobQueue não disponível. O radar automático ficará desativado.")
 
     logger.info("Bot iniciado. Intervalo do radar: %s minutos.", CHECK_INTERVAL_MINUTES)
     app.run_polling(drop_pending_updates=True)
