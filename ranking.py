@@ -12,6 +12,19 @@ def classify(score):
     return "⚪ OPORTUNIDADE PADRÃO"
 
 
+def rare_opportunity(item):
+    if item["type"] == "CDB" and item["liquidity"] and item["rate"] >= 105:
+        return True
+
+    if item["type"] == "CDB" and item["rate"] >= 120:
+        return True
+
+    if item["type"] in ["LCI", "LCA"] and item["rate"] >= 95:
+        return True
+
+    return False
+
+
 def score(item, net):
     s = 0
 
@@ -53,6 +66,10 @@ def score(item, net):
     elif net >= SELIC - 0.5:
         s += 1
 
+    # Bônus raro
+    if rare_opportunity(item):
+        s += 2
+
     return round(s, 1)
 
 
@@ -66,9 +83,10 @@ def rank(data):
         d["score"] = score(d, net)
         d["beats_selic"] = net > SELIC
         d["classification"] = classify(d["score"])
+        d["rare"] = rare_opportunity(d)
 
     return sorted(
         data,
-        key=lambda x: (x["score"], x["net"]),
+        key=lambda x: (x["rare"], x["score"], x["net"]),
         reverse=True
     )
