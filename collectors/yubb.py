@@ -17,47 +17,58 @@ def _clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 
+def _looks_like_product_block(text: str) -> bool:
+    low = text.lower()
+    has_product = any(x in low for x in ["cdb", "lci", "lca"])
+    has_percent = "%" in text
+    return has_product and has_percent and len(text) >= 20
+
+
 def _extract_candidate_blocks_from_html(html: str):
     soup = BeautifulSoup(html, "html.parser")
     candidates = []
 
-    # 1) Blocos visuais comuns
-    for tag in soup.find_all(["article", "section", "div", "li"]):
+    # 1) blocos visuais principais
+    for tag in soup.find_all(["article", "section", "div", "li", "tr"]):
         txt = _clean_text(tag.get_text(" ", strip=True))
-        low = txt.lower()
-
-        if not txt or len(txt) < 20:
-            continue
-
-        if any(x in low for x in ["cdb", "lci", "lca"]) and "%" in txt:
+        if _looks_like_product_block(txt):
             candidates.append(txt)
 
-    # 2) Scripts embutidos com dados renderizados
+    # 2) scripts embutidos
     for script in soup.find_all("script"):
         txt = _clean_text(script.get_text(" ", strip=True))
-        low = txt.lower()
-
-        if not txt or len(txt) < 20:
+        if not txt:
             continue
 
-        if any(x in low for x in ["cdb", "lci", "lca"]) and "%" in txt:
-            parts = re.split(r"[{}\[\];]+", txt)
-            for part in parts:
-                p = _clean_text(part)
-                pl = p.lower()
-                if p and any(x in pl for x in ["cdb", "lci", "lca"]) and "%" in p:
-                    candidates.append(p)
+        # quebra em pedaços menores para facilitar leitura
+        parts = re.split(r"[{}\[\];\n]+", txt)
+        for part in parts:
+            p = _clean_text(part)
+            if _looks_like_product_block(p):
+                candidates.append(p)
 
-    # 3) Fallback no texto geral da página
+    # 3) fallback no texto geral da página
     full_text = _clean_text(soup.get_text(" ", strip=True))
     windows = re.findall(
-        r"(.{0,120}(?:cdb|lci|lca).{0,220})",
+        r"(.{0,160}(?:cdb|lci|lca).{0,260})",
         full_text,
         flags=re.IGNORECASE,
     )
-    candidates.extend([_clean_text(w) for w in windows if _clean_text(w)])
+    for w in windows:
+        w = _clean_text(w)
+        if _looks_like_product_block(w):
+            candidates.append(w)
 
-    return candidates
+    # remove duplicados preservando ordem
+    unique = []
+    seen = set()
+    for c in candidates:
+        key = c.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(c)
+
+    return unique
 
 
 def collect():
@@ -67,24 +78,47 @@ def collect():
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                ],
             )
-            page = browser.new_page(viewport={"width": 1400, "height": 3000})
+
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1440, "height": 2400},
+                locale="pt-BR",
+            )
+
+            page = context.new_page()
 
             page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(7000)
+            page.wait_for_selector("body", timeout=60000)
+            page.wait_for_timeout(8000)
 
-            # rolagem para carregar conteúdo lazy/infinito
-            for _ in range(8):
+            # tenta rolar a página inteira para disparar carregamento lazy
+            for _ in range(10):
                 page.mouse.wheel(0, 5000)
-                page.wait_for_timeout(1800)
+                page.wait_for_timeout(1500)
+
+            # volta um pouco para cima também
+            for _ in range(2):
+                page.mouse.wheel(0, -3000)
+                page.wait_for_timeout(1000)
 
             html = page.content()
+
+            context.close()
             browser.close()
 
         candidate_texts = _extract_candidate_blocks_from_html(html)
 
-        seen = set()
+        seen_products = set()
 
         for raw in candidate_texts:
             product_type = extract_product_type(raw)
@@ -97,10 +131,17 @@ def collect():
             days = extract_term_days(raw)
             liquidity = extract_liquidity(raw)
 
-            key = (bank, product_type, rate, days, liquidity)
-            if key in seen:
+            key = (
+                bank.strip().lower(),
+                product_type.strip().lower(),
+                float(rate),
+                int(days),
+                bool(liquidity),
+            )
+
+            if key in seen_products:
                 continue
-            seen.add(key)
+            seen_products.add(key)
 
             results.append({
                 "bank": bank,
