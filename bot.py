@@ -301,10 +301,37 @@ async def status_cmd(update, context):
         "fallback": "🧪 Fallback",
     }
 
+    active_sources = []
+    inactive_sources = []
+    fallback_line = None
+
+    for source_name, info in source_status.items():
+        label = source_labels.get(source_name, f"📌 {source_name}")
+        count = info.get("count", 0)
+        error = str(info.get("error", "")).strip()
+
+        if source_name == "fallback":
+            fallback_line = f"{label}: {count}"
+            continue
+
+        if count > 0:
+            active_sources.append(f"{label}: {count}")
+        else:
+            if error:
+                inactive_sources.append(f"{label} — {error[:120]}")
+            else:
+                inactive_sources.append(f"{label} — sem retorno no momento")
+
+    active_sources_count = sum(
+        1 for source_name, info in source_status.items()
+        if source_name != "fallback" and info.get("count", 0) > 0
+    )
+
     msg = (
         f"🟢 {BOT_NAME} online\n\n"
-        f"📊 Total coletado: {len(ranked)}\n"
-        f"🌐 Fontes reais: {real_count}\n"
+        f"📊 Oportunidades totais: {len(ranked)}\n"
+        f"🌐 Oportunidades reais: {real_count}\n"
+        f"📡 Fontes ativas: {active_sources_count}\n"
         f"🧪 Fallback/simulação: {sim_count}\n\n"
         f"🏦 Benchmark Selic: {SELIC:.2f}%\n"
         f"📈 CDI: {CDI:.2f}%\n\n"
@@ -314,23 +341,18 @@ async def status_cmd(update, context):
         f"🟢 Isentos (LCI/LCA): {isentos}\n\n"
     )
 
-    source_lines = []
-    error_lines = []
+    if active_sources:
+        msg += "✅ Fontes ativas\n"
+        msg += "\n".join(active_sources)
+        msg += "\n\n"
 
-    for source_name, info in source_status.items():
-        label = source_labels.get(source_name, f"📌 {source_name}")
-        count = info.get("count", 0)
-        error = str(info.get("error", "")).strip()
+    if inactive_sources:
+        msg += "⚠️ Fontes sem retorno no momento\n"
+        msg += "\n".join(inactive_sources)
+        msg += "\n\n"
 
-        source_lines.append(f"{label}: {count}")
-
-        if error:
-            error_lines.append(f"⚠️ {label}: {error[:180]}")
-
-    msg += "\n".join(source_lines)
-
-    if error_lines:
-        msg += "\n\n" + "\n".join(error_lines)
+    if fallback_line:
+        msg += f"{fallback_line}"
 
     await update.message.reply_text(msg)
 
@@ -366,7 +388,7 @@ async def diarios_cmd(update, context):
     diarios = [r for r in ranked if r.get("type") == "CDB" and r.get("liquidity")]
 
     if not diarios:
-        await update.message.reply_text("💧 Nenhum CDB com liquidez diária encontrado.")
+        await update.message.reply_text("💧 Nenhuma oportunidade com liquidez diária encontrada nas fontes ativas no momento.")
         return
 
     msg = "💧 CDBs de liquidez diária\n\n"
@@ -383,7 +405,7 @@ async def curtos_cmd(update, context):
     curtos = [r for r in ranked if r.get("type") == "CDB" and r.get("days", 0) <= 365]
 
     if not curtos:
-        await update.message.reply_text("⏱ Nenhum CDB de curto prazo encontrado.")
+        await update.message.reply_text("⏱ Nenhuma oportunidade de curto prazo encontrada nas fontes ativas no momento.")
         return
 
     msg = "⏱ CDBs de curto prazo\n\n"
@@ -400,7 +422,7 @@ async def isentos_cmd(update, context):
     isentos = [r for r in ranked if r.get("type") in ["LCI", "LCA"]]
 
     if not isentos:
-        await update.message.reply_text("🟢 Nenhum investimento isento encontrado.")
+        await update.message.reply_text("🟢 Nenhum investimento isento encontrado nas fontes ativas no momento.")
         return
 
     msg = "🟢 LCI / LCA\n\n"
@@ -417,7 +439,7 @@ async def selicplus_cmd(update, context):
     selicplus = [r for r in ranked if r.get("net", 0) > SELIC]
 
     if not selicplus:
-        await update.message.reply_text("🚀 Nenhum investimento supera a Selic no momento.")
+        await update.message.reply_text("🚀 Nenhum investimento supera a Selic nas fontes ativas no momento.")
         return
 
     msg = "🚀 Melhores que a Selic\n\n"
