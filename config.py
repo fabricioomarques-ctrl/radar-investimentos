@@ -1,6 +1,6 @@
 import os
 
-BOT_NAME = "Radar de Investimentos PRO MAX"
+BOT_NAME = "Radar de Investimentos PRO"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
