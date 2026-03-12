@@ -8,14 +8,10 @@ from engine import collect_all, get_source_status
 from ranking import rank
 
 
-# =========================================================
-# CONFIGURAÇÕES LOCAIS DO BOT
-# =========================================================
-
 ALERTS_SENT_FILE = "alerts_sent.json"
 ALERT_RUNTIME_FILE = "alert_runtime.json"
 
-ALERT_INTERVAL_SECONDS = getattr(config, "ALERT_INTERVAL_SECONDS", 1800)  # 30 min
+ALERT_INTERVAL_SECONDS = getattr(config, "ALERT_INTERVAL_SECONDS", 1800)
 MAX_ALERTS_PER_CYCLE = getattr(config, "MAX_ALERTS_PER_CYCLE", 3)
 
 TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN
@@ -23,10 +19,6 @@ BOT_NAME = config.BOT_NAME
 SELIC = config.SELIC
 CDI = config.CDI
 
-
-# =========================================================
-# UTILITÁRIOS JSON
-# =========================================================
 
 def load_json_file(path, default):
     if not os.path.exists(path):
@@ -43,10 +35,6 @@ def save_json_file(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-
-# =========================================================
-# ALERTAS - ESTADO E CACHE
-# =========================================================
 
 def load_alert_cache():
     return load_json_file(
@@ -102,10 +90,6 @@ def set_registered_alert_chat_id(chat_id):
     save_alert_runtime(runtime_data)
 
 
-# =========================================================
-# DADOS / RANKING
-# =========================================================
-
 def build_ranked_data():
     data = collect_all()
     ranked = rank(data)
@@ -131,26 +115,16 @@ def format_item(i, r):
 
 
 def build_alert_id(r):
-    """
-    ID estável para anti-alerta repetido.
-    Mantém alinhamento com a deduplicação do engine.py,
-    mas em formato string para persistência.
-    """
     return "|".join([
-        str(r.get("bank", "")),
-        str(r.get("type", "")),
-        str(r.get("rate", "")),
-        str(r.get("days", "")),
-        str(r.get("liquidity", "")),
+        str(r.get("bank", "")).strip().lower(),
+        str(r.get("type", "")).strip().upper(),
+        str(round(float(r.get("rate", 0)), 2)),
+        str(int(r.get("days", 365))),
+        str(bool(r.get("liquidity", False))),
     ])
 
 
 def is_alert_candidate(r):
-    """
-    Critério do alerta automático:
-    - qualquer oportunidade que bata a Selic
-    - ou qualquer oportunidade marcada como rara
-    """
     return bool(r.get("beats_selic")) or bool(r.get("rare"))
 
 
@@ -172,10 +146,6 @@ def build_alert_message(r):
         f"{selic_label}"
     )
 
-
-# =========================================================
-# ALERTAS AUTOMÁTICOS
-# =========================================================
 
 async def process_automatic_alerts(application):
     runtime_data = load_alert_runtime()
@@ -251,18 +221,10 @@ async def post_init(application):
     print(f"🟢 Job de alertas agendado a cada {ALERT_INTERVAL_SECONDS} segundos")
 
 
-# =========================================================
-# REGISTRO DO CHAT DE ALERTA
-# =========================================================
-
 def register_current_chat(update):
     if update and update.effective_chat:
         set_registered_alert_chat_id(update.effective_chat.id)
 
-
-# =========================================================
-# COMANDOS TELEGRAM
-# =========================================================
 
 async def start_cmd(update, context):
     register_current_chat(update)
@@ -330,9 +292,14 @@ async def status_cmd(update, context):
     curtos = sum(1 for i in ranked if i.get("type") == "CDB" and i.get("days", 0) <= 365)
     isentos = sum(1 for i in ranked if i.get("type") in ["LCI", "LCA"])
 
-    yubb_status = source_status.get("yubb", {})
-    public_status = source_status.get("public_pages", {})
-    fallback_status = source_status.get("fallback", {})
+    source_labels = {
+        "yubb": "🔎 Yubb",
+        "public_pages": "🌍 Páginas públicas",
+        "investidor10": "📈 Investidor10",
+        "maisretorno": "📊 MaisRetorno",
+        "statusinvest": "📉 StatusInvest",
+        "fallback": "🧪 Fallback",
+    }
 
     msg = (
         f"🟢 {BOT_NAME} online\n\n"
@@ -345,19 +312,25 @@ async def status_cmd(update, context):
         f"💧 Liquidez diária: {diarios}\n"
         f"⏱ Curto prazo: {curtos}\n"
         f"🟢 Isentos (LCI/LCA): {isentos}\n\n"
-        f"🔎 Yubb: {yubb_status.get('count', 0)}\n"
-        f"🌍 Páginas públicas: {public_status.get('count', 0)}\n"
-        f"🧪 Fallback: {fallback_status.get('count', 0)}"
     )
 
-    if yubb_status.get("error"):
-        msg += f"\n\n⚠️ Yubb: {str(yubb_status['error'])[:180]}"
+    source_lines = []
+    error_lines = []
 
-    if public_status.get("error"):
-        msg += f"\n⚠️ Públicas: {str(public_status['error'])[:180]}"
+    for source_name, info in source_status.items():
+        label = source_labels.get(source_name, f"📌 {source_name}")
+        count = info.get("count", 0)
+        error = str(info.get("error", "")).strip()
 
-    if fallback_status.get("error"):
-        msg += f"\n⚠️ Fallback: {str(fallback_status['error'])[:180]}"
+        source_lines.append(f"{label}: {count}")
+
+        if error:
+            error_lines.append(f"⚠️ {label}: {error[:180]}")
+
+    msg += "\n".join(source_lines)
+
+    if error_lines:
+        msg += "\n\n" + "\n".join(error_lines)
 
     await update.message.reply_text(msg)
 
@@ -512,10 +485,6 @@ async def testealerta_cmd(update, context):
     msg = build_alert_message(sample)
     await update.message.reply_text(msg)
 
-
-# =========================================================
-# MAIN
-# =========================================================
 
 def main():
     if not TELEGRAM_BOT_TOKEN:
