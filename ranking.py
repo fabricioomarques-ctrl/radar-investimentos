@@ -2,176 +2,144 @@ from utils.calc import gross_return, net_return
 from config import CDI, SELIC
 
 
-def normalize_type(value):
-    text = str(value or "").strip().lower()
-
-    if "lci" in text:
-        return "LCI"
-    if "lca" in text:
-        return "LCA"
-    if "cdb" in text:
-        return "CDB"
-
-    # Fontes que retornam faixas como:
-    # "Até 180 dias", "De 181 a 360 dias", etc.
-    if "dias" in text or "meses" in text or "anos" in text:
-        return "CDB"
-
-    return str(value or "").strip().upper() or "INVESTIMENTO"
-
-
 def classify(score):
-    if score >= 11:
-        return "🔴 OPORTUNIDADE IMPERDÍVEL"
-    elif score >= 8:
+
+    if score >= 10:
+        return "🔥 OPORTUNIDADE EXCEPCIONAL"
+
+    if score >= 8:
         return "🟡 OPORTUNIDADE FORTE"
-    elif score >= 5:
+
+    if score >= 5:
         return "🟢 BOA OPORTUNIDADE"
+
     return "⚪ OPORTUNIDADE PADRÃO"
 
 
-def rare_opportunity(item, net=None):
-    inv_type = normalize_type(item.get("type"))
-    rate = float(item.get("rate", 0))
-    liquidity = bool(item.get("liquidity", False))
-    days = int(item.get("days", 365))
+def detect_market_average(data):
 
-    # Regras mais reais para oportunidades raras
-    if inv_type == "CDB":
-        if liquidity and rate >= 108:
-            return True
-        if not liquidity and rate >= 120:
-            return True
-        if net is not None and net >= SELIC + 1.0:
-            return True
+    if not data:
+        return 0
 
-    if inv_type in ["LCI", "LCA"]:
-        if rate >= 95:
-            return True
-        if days <= 365 and rate >= 92:
-            return True
+    rates = [i["rate"] for i in data]
+
+    return sum(rates) / len(rates)
+
+
+def detect_anomaly(rate, market_avg):
+
+    if market_avg == 0:
+        return False
+
+    if rate >= market_avg + 10:
+        return True
 
     return False
 
 
-def mark_best_rates(items):
-    best_by_type = {}
+def rare_opportunity(item, net):
 
-    for item in items:
-        inv_type = item.get("type_normalized")
-        rate = float(item.get("rate", 0))
+    rate = item["rate"]
 
-        if inv_type not in best_by_type or rate > best_by_type[inv_type]:
-            best_by_type[inv_type] = rate
+    if item["type"] == "CDB":
 
-    for item in items:
-        inv_type = item.get("type_normalized")
-        item["best_rate"] = float(item.get("rate", 0)) == best_by_type.get(inv_type, -1)
+        if item["liquidity"] and rate >= 108:
+            return True
 
-    return items
+        if not item["liquidity"] and rate >= 120:
+            return True
+
+    if item["type"] in ["LCI", "LCA"] and rate >= 95:
+        return True
+
+    if net > SELIC + 1.5:
+        return True
+
+    return False
 
 
-def score(item, net):
-    inv_type = normalize_type(item.get("type"))
-    rate = float(item.get("rate", 0))
-    liquidity = bool(item.get("liquidity", False))
-    days = int(item.get("days", 365))
-    best_rate = bool(item.get("best_rate", False))
+def score(item, net, market_avg):
 
     s = 0
 
-    # Taxa
-    if inv_type in ["LCI", "LCA"]:
-        if rate >= 97:
-            s += 6
-        elif rate >= 95:
-            s += 5
-        elif rate >= 92:
-            s += 4
-        elif rate >= 90:
-            s += 3
-        elif rate >= 85:
-            s += 2
-    else:
-        if rate >= 125:
-            s += 8
-        elif rate >= 120:
-            s += 7
-        elif rate >= 115:
-            s += 6
-        elif rate >= 110:
-            s += 5
-        elif rate >= 105:
-            s += 4
-        elif rate >= 102:
-            s += 2
+    rate = item["rate"]
 
-    # Liquidez
-    if liquidity:
-        s += 1.5
+    if rate >= market_avg + 10:
+        s += 4
 
-    # Prazo
-    if days <= 180:
-        s += 1.5
-    elif days <= 365:
-        s += 1
-    elif days <= 720:
-        s += 0.5
-
-    # Melhor que Selic
-    if net >= SELIC + 1.0:
+    elif rate >= market_avg + 5:
         s += 3
-    elif net > SELIC + 0.25:
+
+    elif rate >= market_avg + 2:
         s += 2
-    elif net >= SELIC - 0.25:
+
+    elif rate >= market_avg:
         s += 1
 
-    # Bônus raro
-    if rare_opportunity(item, net):
-        s += 2.5
+    if item["liquidity"]:
+        s += 1
 
-    # Melhor taxa da categoria
-    if best_rate:
+    if item["days"] <= 365:
+        s += 1
+
+    if net > SELIC:
+        s += 2
+
+    if item.get("rare"):
+        s += 2
+
+    if item.get("best_rate"):
         s += 2
 
     return round(s, 1)
 
 
-def rank(data):
-    items = []
+def mark_best_rates(data):
 
-    for item in data:
-        item["type_normalized"] = normalize_type(item.get("type"))
+    best_rate = 0
 
-        gross = gross_return(item["rate"], CDI)
+    for i in data:
 
-        if item["type_normalized"] in ["LCI", "LCA"]:
-            net = gross
+        if i["rate"] > best_rate:
+            best_rate = i["rate"]
+
+    for i in data:
+
+        if i["rate"] == best_rate:
+            i["best_rate"] = True
         else:
-            net = net_return(gross, item["days"])
+            i["best_rate"] = False
 
-        item["gross"] = gross
-        item["net"] = net
-        item["rare"] = rare_opportunity(item, net)
+    return best_rate
 
-        items.append(item)
 
-    items = mark_best_rates(items)
+def rank(data):
 
-    for item in items:
-        item["score"] = score(item, item["net"])
-        item["beats_selic"] = item["net"] > SELIC
-        item["classification"] = classify(item["score"])
+    market_avg = detect_market_average(data)
+
+    best_rate = mark_best_rates(data)
+
+    for d in data:
+
+        gross = gross_return(d["rate"], CDI)
+
+        net = net_return(gross, d["days"])
+
+        d["gross"] = gross
+        d["net"] = net
+
+        d["rare"] = rare_opportunity(d, net)
+
+        d["anomaly"] = detect_anomaly(d["rate"], market_avg)
+
+        d["score"] = score(d, net, market_avg)
+
+        d["beats_selic"] = net > SELIC
+
+        d["classification"] = classify(d["score"])
 
     return sorted(
-        items,
-        key=lambda x: (
-            x.get("rare", False),
-            x.get("best_rate", False),
-            x.get("beats_selic", False),
-            x.get("score", 0),
-            x.get("net", 0),
-            x.get("rate", 0)
-        ),
+        data,
+        key=lambda x: (x["score"], x["rate"]),
         reverse=True
     )
