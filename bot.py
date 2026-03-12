@@ -4,6 +4,7 @@ from datetime import datetime
 
 from telegram import ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler
+
 import config
 from engine import collect_all, get_source_status
 from ranking import rank
@@ -140,7 +141,7 @@ def normalize_type_identity(inv_type):
     if "cdb" in text:
         return "CDB"
 
-    # Quando a fonte traz faixas como "Até 180 dias", "De 181 a 360 dias"
+    # Fontes que retornam faixas de prazo como "Até 180 dias"
     if "dias" in text or "anos" in text or "meses" in text:
         return "CDB"
 
@@ -155,10 +156,10 @@ def build_product_key(r):
     """
     ID estável da oportunidade para:
     - reduzir falsas "novas oportunidades"
-    - permitir detectar mudança de taxa no mesmo produto
+    - detectar mudança de taxa no mesmo produto
 
-    Aqui ignoramos a taxa no ID, para que a mesma oportunidade com taxa alterada
-    seja tratada como mudança de taxa, e não como produto totalmente novo.
+    Ignoramos a taxa no ID para que a mesma oportunidade com taxa alterada
+    vire mudança de taxa, e não produto totalmente novo.
     """
     bank = normalize_bank_name(r.get("bank"))
     inv_type = normalize_type_identity(r.get("type"))
@@ -200,8 +201,10 @@ def snapshot_from_item(r):
 def append_market_event(state, event, max_events=200):
     events = state.get("events", [])
     events.append(event)
+
     if len(events) > max_events:
         events = events[-max_events:]
+
     state["events"] = events
 
 
@@ -310,7 +313,7 @@ def format_change_item(i, change):
 
     return (
         f"{i}️⃣ {direction}\n"
-        f"💼 {new_item.get('type')} \n"
+        f"💼 {new_item.get('type')}\n"
         f"🏦 Instituição: {new_item.get('bank')}\n"
         f"📅 Prazo: {new_item.get('days')} dias\n"
         f"💧 Liquidez diária: {'Sim' if new_item.get('liquidity') else 'Não'}\n"
@@ -653,6 +656,7 @@ async def novas_cmd(update, context):
         return
 
     msg = "🆕 Novas oportunidades detectadas\n\n"
+
     for i, r in enumerate(new_items[:10], 1):
         msg += format_item(i, r)
 
@@ -676,6 +680,7 @@ async def mudancas_cmd(update, context):
         return
 
     msg = "📈 Mudanças de taxa detectadas\n\n"
+
     for i, change in enumerate(changed_items[:10], 1):
         msg += format_change_item(i, change)
 
@@ -719,7 +724,7 @@ async def historico_cmd(update, context):
             msg += (
                 f"{i}️⃣ 📈 Mudança de taxa\n"
                 f"🕒 {timestamp}\n"
-                f"💼 {item.get('type')} \n"
+                f"💼 {item.get('type')}\n"
                 f"🏦 {item.get('bank')}\n"
                 f"🔁 Antes: {event.get('old_rate')}% CDI\n"
                 f"✨ Agora: {event.get('new_rate')}% CDI\n\n"
@@ -858,6 +863,7 @@ async def diarios_cmd(update, context):
         return
 
     msg = "💧 CDBs de liquidez diária\n\n"
+
     for i, r in enumerate(diarios[:10], 1):
         msg += format_item(i, r)
 
@@ -877,6 +883,7 @@ async def curtos_cmd(update, context):
         return
 
     msg = "⏱ CDBs de curto prazo\n\n"
+
     for i, r in enumerate(curtos[:10], 1):
         msg += format_item(i, r)
 
@@ -896,6 +903,7 @@ async def isentos_cmd(update, context):
         return
 
     msg = "🟢 LCI / LCA\n\n"
+
     for i, r in enumerate(isentos[:10], 1):
         msg += format_item(i, r)
 
@@ -915,6 +923,7 @@ async def selicplus_cmd(update, context):
         return
 
     msg = "🚀 Melhores que a Selic\n\n"
+
     for i, r in enumerate(selicplus[:10], 1):
         msg += format_item(i, r)
 
