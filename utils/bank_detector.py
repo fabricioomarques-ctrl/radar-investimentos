@@ -1,5 +1,6 @@
 import re
 
+
 BANK_PATTERNS = {
     "Inter": ["inter"],
     "Pan": ["pan"],
@@ -7,15 +8,15 @@ BANK_PATTERNS = {
     "Sofisa": ["sofisa"],
     "Daycoval": ["daycoval"],
     "BTG": ["btg"],
-    "XP": ["xp"],
+    "XP": ["xp investimentos", "xp"],
     "Original": ["original"],
-    "ABC": ["abc brasil"],
+    "ABC Brasil": ["abc brasil"],
     "Pine": ["pine"],
     "Mercantil": ["mercantil"],
 }
 
 
-def detect_bank(text: str):
+def detect_bank(text):
 
     if not text:
         return "Mercado"
