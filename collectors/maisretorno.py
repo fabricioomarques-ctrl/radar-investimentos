@@ -1,141 +1,60 @@
-import re
-from playwright.sync_api import sync_playwright
+import requests
+from bs4 import BeautifulSoup
+from utils.bank_detector import detect_bank
+
 
 URL = "https://maisretorno.com/renda-fixa"
 
 
-def _safe_float(text, default=None):
-    try:
-        if text is None:
-            return default
-
-        cleaned = str(text).replace("%", "").replace(",", ".").strip()
-        match = re.search(r"(\d+(?:\.\d+)?)", cleaned)
-
-        if match:
-            return float(match.group(1))
-
-        return default
-    except Exception:
-        return default
-
-
-def _safe_int(text, default=365):
-    try:
-        if text is None:
-            return default
-
-        base = str(text).lower().strip()
-
-        m_days = re.search(r"(\d+)\s*dias?", base)
-        if m_days:
-            return int(m_days.group(1))
-
-        m_months = re.search(r"(\d+)\s*meses?", base)
-        if m_months:
-            return int(m_months.group(1)) * 30
-
-        m_years = re.search(r"(\d+)\s*anos?", base)
-        if m_years:
-            return int(m_years.group(1)) * 365
-
-        match = re.search(r"(\d+)", base)
-        if match:
-            return int(match.group(1))
-
-        return default
-    except Exception:
-        return default
-
-
-def _detect_type(text):
-    base = str(text).lower()
-
-    if "lci" in base:
-        return "LCI"
-    if "lca" in base:
-        return "LCA"
-    if "cdb" in base:
-        return "CDB"
-
-    return None
-
-
 def collect():
+
     results = []
-    seen = set()
 
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/145.0.0.0 Safari/537.36"
-                )
-            )
 
-            page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(8000)
+        r = requests.get(URL, timeout=20)
 
-            text = page.locator("body").inner_text(timeout=10000)
-            browser.close()
+        if r.status_code != 200:
+            return []
 
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        soup = BeautifulSoup(r.text, "html.parser")
 
-        for line in lines:
-            line_lower = line.lower()
+        cards = soup.find_all("div")
 
-            if not any(k in line_lower for k in ["cdb", "lci", "lca"]):
+        for card in cards:
+
+            text = card.get_text(" ", strip=True)
+
+            if "%" not in text:
                 continue
 
-            rate_match = re.search(r"(\d+(?:[.,]\d+)?)\s*%\s*cdi", line, re.I)
-            if not rate_match:
-                continue
+            rate = None
 
-            rate = _safe_float(rate_match.group(1))
+            for part in text.split():
+
+                if "%" in part:
+
+                    try:
+                        rate = float(part.replace("%", "").replace(",", "."))
+                    except:
+                        pass
+
             if rate is None:
                 continue
 
-            inv_type = _detect_type(line)
-            if not inv_type:
-                continue
+            bank = detect_bank(text)
 
-            liquidity = any(
-                k in line_lower for k in [
-                    "liquidez diária",
-                    "liquidez diaria",
-                    "resgate diário",
-                    "resgate diario"
-                ]
-            )
-
-            days = _safe_int(line, 365)
-
-            item = {
-                "bank": "Mercado",
-                "type": inv_type,
+            results.append({
+                "bank": bank,
+                "type": "CDB",
                 "rate": rate,
-                "days": days,
-                "liquidity": liquidity,
+                "days": 365,
+                "liquidity": False,
                 "source": "MaisRetorno",
                 "url": URL
-            }
+            })
 
-            key = (
-                item["bank"],
-                item["type"],
-                item["rate"],
-                item["days"],
-                item["liquidity"],
-            )
-
-            if key not in seen:
-                seen.add(key)
-                results.append(item)
-
-    except Exception:
+    except:
         return []
 
     return results
