@@ -1,9 +1,13 @@
 import requests
 from bs4 import BeautifulSoup
-from utils.bank_detector import detect_bank
 
 
 URL = "https://maisretorno.com/renda-fixa"
+
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
 
 
 def collect():
@@ -12,49 +16,45 @@ def collect():
 
     try:
 
-        r = requests.get(URL, timeout=20)
+        r = requests.get(URL, headers=HEADERS, timeout=20)
 
         if r.status_code != 200:
             return []
 
         soup = BeautifulSoup(r.text, "html.parser")
 
-        cards = soup.find_all("div")
+        text = soup.get_text(" ", strip=True)
 
-        for card in cards:
+        words = text.split()
 
-            text = card.get_text(" ", strip=True)
+        for w in words:
 
-            if "%" not in text:
-                continue
+            if "%" in w:
 
-            rate = None
+                try:
 
-            for part in text.split():
+                    rate = float(w.replace("%", "").replace(",", "."))
 
-                if "%" in part:
+                except:
+                    continue
 
-                    try:
-                        rate = float(part.replace("%", "").replace(",", "."))
-                    except:
-                        pass
+                if rate < 80:
+                    continue
 
-            if rate is None:
-                continue
+                results.append({
 
-            bank = detect_bank(text)
+                    "bank": "Mercado",
+                    "type": "CDB",
+                    "rate": rate,
+                    "days": 365,
+                    "liquidity": False,
+                    "source": "MaisRetorno",
+                    "url": URL
 
-            results.append({
-                "bank": bank,
-                "type": "CDB",
-                "rate": rate,
-                "days": 365,
-                "liquidity": False,
-                "source": "MaisRetorno",
-                "url": URL
-            })
+                })
 
-    except:
+    except Exception:
+
         return []
 
     return results
