@@ -228,6 +228,7 @@ def build_main_menu_text():
         "📚 Comandos principais\n"
         "/menu - ver menu completo\n"
         "/help - ajuda rápida do radar\n"
+        "/about - sobre o radar\n"
         "/ranking - ver ranking\n"
         "/top10 - top 10\n"
         "/status - ver status\n"
@@ -267,6 +268,22 @@ def build_help_text():
     )
 
 
+def build_about_text():
+    return (
+        f"ℹ️ Sobre o {BOT_NAME}\n\n"
+        "O Radar de Investimentos monitora oportunidades de renda fixa no Brasil.\n\n"
+        "O sistema analisa automaticamente CDBs, LCIs e LCAs de múltiplas fontes públicas "
+        "e organiza as melhores oportunidades em um ranking.\n\n"
+        "Principais recursos:\n"
+        "• ranking automático de oportunidades\n"
+        "• detecção de investimentos que superam a Selic\n"
+        "• filtros por liquidez diária e prazo\n"
+        "• identificação de oportunidades raras\n"
+        "• alertas automáticos\n\n"
+        "Use /menu para acessar todos os comandos do radar."
+    )
+
+
 async def start_cmd(update, context):
     register_current_chat(update)
 
@@ -290,6 +307,15 @@ async def help_cmd(update, context):
 
     await update.message.reply_text(
         build_help_text(),
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+
+async def about_cmd(update, context):
+    register_current_chat(update)
+
+    await update.message.reply_text(
+        build_about_text(),
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -412,7 +438,7 @@ async def diarios_cmd(update, context):
     register_current_chat(update)
 
     ranked = build_ranked_data()
-    diarios = [r for r in ranked if r.get("type") == "CDB" and r.get("liquidity")]
+    diarios = [r for r in ranked if r.get("type") == "CDB" and i.get("liquidity")]
 
     if not diarios:
         await update.message.reply_text(
@@ -557,6 +583,7 @@ def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("about", about_cmd))
     app.add_handler(CommandHandler("benchmark", benchmark_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ranking", ranking_cmd))
