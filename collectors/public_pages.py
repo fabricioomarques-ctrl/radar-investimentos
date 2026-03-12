@@ -1,55 +1,73 @@
 import requests
 from bs4 import BeautifulSoup
+from utils.bank_detector import detect_bank
 
-SOURCES = [
-    "https://www.infomoney.com.br/guias/cdb/",
-    "https://www.infomoney.com.br/guias/lci-lca/",
-]
+
+URL = "https://maisretorno.com/renda-fixa"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0 Safari/537.36"
+    )
+}
 
 
 def collect():
 
     results = []
 
-    for url in SOURCES:
+    try:
 
-        try:
-            r = requests.get(url, timeout=20)
+        r = requests.get(URL, headers=HEADERS, timeout=20)
 
-            if r.status_code != 200:
+        if r.status_code != 200:
+            return []
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        cards = soup.find_all("div")
+
+        for card in cards:
+
+            text = card.get_text(" ", strip=True)
+
+            if not text:
                 continue
 
-            soup = BeautifulSoup(r.text, "html.parser")
+            text_lower = text.lower()
 
-            tables = soup.find_all("table")
+            if "cdb" not in text_lower and "lci" not in text_lower and "lca" not in text_lower:
+                continue
 
-            for table in tables:
+            rate = None
 
-                rows = table.find_all("tr")
+            for part in text.split():
 
-                for row in rows:
+                if "%" in part:
 
-                    cols = [c.text.strip() for c in row.find_all("td")]
+                    try:
+                        rate = float(part.replace("%", "").replace(",", "."))
+                    except:
+                        pass
 
-                    if len(cols) < 2:
-                        continue
+            if rate is None:
+                continue
 
-                    name = cols[0]
+            bank = detect_bank(text)
 
-                    if "%" not in row.text:
-                        continue
+            results.append({
+                "bank": bank,
+                "type": "CDB",
+                "rate": rate,
+                "days": 365,
+                "liquidity": False,
+                "source": "MaisRetorno",
+                "url": URL
+            })
 
-                    results.append({
-                        "bank": "Mercado",
-                        "type": name,
-                        "rate": 110,
-                        "days": 365,
-                        "liquidity": False,
-                        "source": "PublicPages",
-                        "url": url
-                    })
-
-        except Exception:
-            continue
+    except:
+        return []
 
     return results
