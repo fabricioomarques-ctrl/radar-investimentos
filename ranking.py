@@ -38,7 +38,7 @@ def rare_opportunity(item, net=None):
 
     # Regras mais reais para oportunidades raras
     if inv_type == "CDB":
-        if liquidity and rate >= 110:
+        if liquidity and rate >= 108:
             return True
         if not liquidity and rate >= 120:
             return True
@@ -54,11 +54,29 @@ def rare_opportunity(item, net=None):
     return False
 
 
+def mark_best_rates(items):
+    best_by_type = {}
+
+    for item in items:
+        inv_type = item.get("type_normalized")
+        rate = float(item.get("rate", 0))
+
+        if inv_type not in best_by_type or rate > best_by_type[inv_type]:
+            best_by_type[inv_type] = rate
+
+    for item in items:
+        inv_type = item.get("type_normalized")
+        item["best_rate"] = float(item.get("rate", 0)) == best_by_type.get(inv_type, -1)
+
+    return items
+
+
 def score(item, net):
     inv_type = normalize_type(item.get("type"))
     rate = float(item.get("rate", 0))
     liquidity = bool(item.get("liquidity", False))
     days = int(item.get("days", 365))
+    best_rate = bool(item.get("best_rate", False))
 
     s = 0
 
@@ -112,27 +130,44 @@ def score(item, net):
     if rare_opportunity(item, net):
         s += 2.5
 
+    # Melhor taxa da categoria
+    if best_rate:
+        s += 2
+
     return round(s, 1)
 
 
 def rank(data):
-    for d in data:
-        d["type_normalized"] = normalize_type(d.get("type"))
+    items = []
 
-        gross = gross_return(d["rate"], CDI)
-        net = net_return(gross, d["days"])
+    for item in data:
+        item["type_normalized"] = normalize_type(item.get("type"))
 
-        d["gross"] = gross
-        d["net"] = net
-        d["score"] = score(d, net)
-        d["beats_selic"] = net > SELIC
-        d["classification"] = classify(d["score"])
-        d["rare"] = rare_opportunity(d, net)
+        gross = gross_return(item["rate"], CDI)
+
+        if item["type_normalized"] in ["LCI", "LCA"]:
+            net = gross
+        else:
+            net = net_return(gross, item["days"])
+
+        item["gross"] = gross
+        item["net"] = net
+        item["rare"] = rare_opportunity(item, net)
+
+        items.append(item)
+
+    items = mark_best_rates(items)
+
+    for item in items:
+        item["score"] = score(item, item["net"])
+        item["beats_selic"] = item["net"] > SELIC
+        item["classification"] = classify(item["score"])
 
     return sorted(
-        data,
+        items,
         key=lambda x: (
             x.get("rare", False),
+            x.get("best_rate", False),
             x.get("beats_selic", False),
             x.get("score", 0),
             x.get("net", 0),
