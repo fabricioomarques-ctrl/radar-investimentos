@@ -1,6 +1,5 @@
 import requests
 from bs4 import BeautifulSoup
-from utils.bank_detector import detect_bank
 
 
 URL = "https://investidor10.com.br/renda-fixa/"
@@ -23,42 +22,38 @@ def collect():
 
         soup = BeautifulSoup(r.text, "html.parser")
 
-        cards = soup.find_all("tr")
+        text = soup.get_text(" ", strip=True)
 
-        for card in cards:
+        words = text.split()
 
-            text = card.get_text(" ", strip=True)
+        for w in words:
 
-            if "%" not in text:
-                continue
+            if "%" in w:
 
-            rate = None
+                try:
 
-            for part in text.split():
+                    rate = float(w.replace("%", "").replace(",", "."))
 
-                if "%" in part:
+                except:
+                    continue
 
-                    try:
-                        rate = float(part.replace("%", "").replace(",", "."))
-                    except:
-                        pass
+                if rate < 80:
+                    continue
 
-            if rate is None:
-                continue
+                results.append({
 
-            bank = detect_bank(text)
+                    "bank": "Mercado",
+                    "type": "CDB",
+                    "rate": rate,
+                    "days": 365,
+                    "liquidity": False,
+                    "source": "Investidor10",
+                    "url": URL
 
-            results.append({
-                "bank": bank,
-                "type": "CDB",
-                "rate": rate,
-                "days": 365,
-                "liquidity": False,
-                "source": "Investidor10",
-                "url": URL
-            })
+                })
 
-    except:
+    except Exception:
+
         return []
 
     return results
