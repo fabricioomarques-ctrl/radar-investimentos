@@ -2,6 +2,7 @@ import json
 import os
 from datetime import datetime
 
+from telegram import ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler
 import config
 from engine import collect_all, get_source_status
@@ -244,7 +245,11 @@ async def start_cmd(update, context):
         "/testealerta - enviar alerta de teste\n"
         "/setalertchat - registrar este chat para alertas automáticos"
     )
-    await update.message.reply_text(msg)
+
+    await update.message.reply_text(
+        msg,
+        reply_markup=ReplyKeyboardRemove()
+    )
 
 
 async def menu_cmd(update, context):
@@ -264,7 +269,11 @@ async def menu_cmd(update, context):
         "/testealerta - enviar alerta de teste\n"
         "/setalertchat - registrar este chat para alertas automáticos"
     )
-    await update.message.reply_text(msg)
+
+    await update.message.reply_text(
+        msg,
+        reply_markup=ReplyKeyboardRemove()
+    )
 
 
 async def benchmark_cmd(update, context):
