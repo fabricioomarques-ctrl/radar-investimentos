@@ -80,11 +80,6 @@ def save_alert_runtime(runtime_data):
     save_json_file(ALERT_RUNTIME_FILE, runtime_data)
 
 
-def get_registered_alert_chat_id():
-    runtime_data = load_alert_runtime()
-    return runtime_data.get("alert_chat_id")
-
-
 def set_registered_alert_chat_id(chat_id):
     runtime_data = load_alert_runtime()
     runtime_data["alert_chat_id"] = str(chat_id)
@@ -227,27 +222,56 @@ def register_current_chat(update):
         set_registered_alert_chat_id(update.effective_chat.id)
 
 
-async def start_cmd(update, context):
-    register_current_chat(update)
-
-    msg = (
+def build_main_menu_text():
+    return (
         f"💰 {BOT_NAME}\n\n"
+        "📚 Comandos principais\n"
         "/menu - ver menu completo\n"
+        "/help - ajuda rápida do radar\n"
         "/ranking - ver ranking\n"
         "/top10 - top 10\n"
+        "/status - ver status\n"
+        "/benchmark - ver benchmark\n\n"
+        "📊 Filtros de oportunidades\n"
         "/diarios - CDB liquidez diária\n"
         "/curtos - CDB curto prazo\n"
         "/isentos - LCI/LCA\n"
-        "/selicplus - melhores que Selic\n"
-        "/benchmark - ver benchmark\n"
-        "/status - ver status\n"
+        "/selicplus - melhores que Selic\n\n"
+        "🚨 Alertas e sistema\n"
         "/alertastatus - status dos alertas\n"
         "/testealerta - enviar alerta de teste\n"
         "/setalertchat - registrar este chat para alertas automáticos"
     )
 
+
+def build_help_text():
+    return (
+        f"📚 Ajuda do {BOT_NAME}\n\n"
+        "Este bot monitora oportunidades de renda fixa e organiza os resultados automaticamente.\n\n"
+        "📈 Análise geral\n"
+        "/ranking - ranking principal das oportunidades\n"
+        "/top10 - top 10 investimentos do radar\n"
+        "/status - situação atual do radar e das fontes\n"
+        "/benchmark - Selic e CDI atuais usados na comparação\n\n"
+        "🔎 Filtros específicos\n"
+        "/diarios - oportunidades com liquidez diária\n"
+        "/curtos - investimentos de curto prazo\n"
+        "/isentos - LCIs e LCAs\n"
+        "/selicplus - investimentos que superam a Selic\n\n"
+        "🚨 Alertas automáticos\n"
+        "/setalertchat - define este chat para receber alertas\n"
+        "/alertastatus - mostra o estado dos alertas automáticos\n"
+        "/testealerta - envia um alerta de teste\n\n"
+        "💡 Dica\n"
+        "Use /menu quando quiser ver a lista completa de comandos."
+    )
+
+
+async def start_cmd(update, context):
+    register_current_chat(update)
+
     await update.message.reply_text(
-        msg,
+        build_main_menu_text(),
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -255,23 +279,17 @@ async def start_cmd(update, context):
 async def menu_cmd(update, context):
     register_current_chat(update)
 
-    msg = (
-        f"💰 {BOT_NAME}\n\n"
-        "/ranking - ver ranking\n"
-        "/top10 - top 10\n"
-        "/diarios - CDB liquidez diária\n"
-        "/curtos - CDB curto prazo\n"
-        "/isentos - LCI/LCA\n"
-        "/selicplus - melhores que Selic\n"
-        "/benchmark - ver benchmark\n"
-        "/status - ver status\n"
-        "/alertastatus - status dos alertas\n"
-        "/testealerta - enviar alerta de teste\n"
-        "/setalertchat - registrar este chat para alertas automáticos"
+    await update.message.reply_text(
+        build_main_menu_text(),
+        reply_markup=ReplyKeyboardRemove()
     )
 
+
+async def help_cmd(update, context):
+    register_current_chat(update)
+
     await update.message.reply_text(
-        msg,
+        build_help_text(),
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -397,7 +415,9 @@ async def diarios_cmd(update, context):
     diarios = [r for r in ranked if r.get("type") == "CDB" and r.get("liquidity")]
 
     if not diarios:
-        await update.message.reply_text("💧 Nenhuma oportunidade com liquidez diária encontrada nas fontes ativas no momento.")
+        await update.message.reply_text(
+            "💧 Nenhuma oportunidade com liquidez diária encontrada nas fontes ativas no momento."
+        )
         return
 
     msg = "💧 CDBs de liquidez diária\n\n"
@@ -414,7 +434,9 @@ async def curtos_cmd(update, context):
     curtos = [r for r in ranked if r.get("type") == "CDB" and r.get("days", 0) <= 365]
 
     if not curtos:
-        await update.message.reply_text("⏱ Nenhuma oportunidade de curto prazo encontrada nas fontes ativas no momento.")
+        await update.message.reply_text(
+            "⏱ Nenhuma oportunidade de curto prazo encontrada nas fontes ativas no momento."
+        )
         return
 
     msg = "⏱ CDBs de curto prazo\n\n"
@@ -431,7 +453,9 @@ async def isentos_cmd(update, context):
     isentos = [r for r in ranked if r.get("type") in ["LCI", "LCA"]]
 
     if not isentos:
-        await update.message.reply_text("🟢 Nenhum investimento isento encontrado nas fontes ativas no momento.")
+        await update.message.reply_text(
+            "🟢 Nenhum investimento isento encontrado nas fontes ativas no momento."
+        )
         return
 
     msg = "🟢 LCI / LCA\n\n"
@@ -448,7 +472,9 @@ async def selicplus_cmd(update, context):
     selicplus = [r for r in ranked if r.get("net", 0) > SELIC]
 
     if not selicplus:
-        await update.message.reply_text("🚀 Nenhum investimento supera a Selic nas fontes ativas no momento.")
+        await update.message.reply_text(
+            "🚀 Nenhum investimento supera a Selic nas fontes ativas no momento."
+        )
         return
 
     msg = "🚀 Melhores que a Selic\n\n"
@@ -530,6 +556,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("benchmark", benchmark_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ranking", ranking_cmd))
