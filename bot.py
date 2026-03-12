@@ -25,10 +25,6 @@ SELIC = config.SELIC
 CDI = config.CDI
 
 
-# =========================================================
-# JSON HELPERS
-# =========================================================
-
 def load_json_file(path, default):
     if not os.path.exists(path):
         return default
@@ -44,10 +40,6 @@ def save_json_file(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-
-# =========================================================
-# ALERT CACHE / RUNTIME
-# =========================================================
 
 def load_alert_cache():
     return load_json_file(
@@ -97,10 +89,6 @@ def set_registered_alert_chat_id(chat_id):
     runtime_data["alert_chat_id"] = str(chat_id)
     save_alert_runtime(runtime_data)
 
-
-# =========================================================
-# RADAR MARKET STATE
-# =========================================================
 
 def load_market_state():
     return load_json_file(
@@ -194,7 +182,8 @@ def snapshot_from_item(r):
         "net": r.get("net"),
         "score": r.get("score"),
         "classification": r.get("classification"),
-        "rare": r.get("rare"),
+        "promo": r.get("promo"),
+        "anomaly": r.get("anomaly"),
         "best_rate": r.get("best_rate"),
         "beats_selic": r.get("beats_selic"),
     }
@@ -269,10 +258,6 @@ def scan_market_changes(ranked):
     return new_items, changed_items
 
 
-# =========================================================
-# RADAR DATA
-# =========================================================
-
 def build_ranked_data():
     data = collect_all()
     ranked = rank(data)
@@ -280,51 +265,27 @@ def build_ranked_data():
 
 
 def format_item(i, r):
-
-    rare_label = ""
-    anomaly_label = ""
-    best_label = ""
-
-    if r.get("best_rate"):
-        best_label = "🏆 MELHOR TAXA DO MERCADO\n"
-
-    if r.get("rare"):
-        rare_label = "🔥 OPORTUNIDADE RARA\n"
-
-    if r.get("anomaly"):
-        anomaly_label = "🚨 TAXA FORA DA CURVA\n"
-
-    selic_label = (
-        "✅ Melhor que Selic"
-        if r.get("beats_selic")
-        else "➖ Não supera a Selic"
-    )
+    promo_label = "🚨 PROMOÇÃO DE MERCADO\n" if r.get("promo") else ""
+    anomaly_label = "📈 TAXA FORA DA CURVA\n" if r.get("anomaly") else ""
+    best_label = "🏆 MELHOR TAXA DO MERCADO\n" if r.get("best_rate") else ""
+    selic_label = "✅ Melhor que Selic" if r.get("beats_selic") else "➖ Não supera a Selic"
 
     msg = ""
-
-    msg += best_label
-    msg += rare_label
+    msg += promo_label
     msg += anomaly_label
-
+    msg += best_label
     msg += f"{i}️⃣ {r['type']} {r['rate']}% CDI\n"
-
     msg += f"🏦 Instituição: {r['bank']}\n"
-
     msg += f"📅 Prazo: {r['days']} dias\n"
-
     msg += f"💧 Liquidez diária: {'Sim' if r['liquidity'] else 'Não'}\n"
-
     msg += f"🧾 Retorno bruto estimado: {r['gross']:.2f}% a.a.\n"
-
     msg += f"💰 Retorno líquido estimado: {r['net']:.2f}% a.a.\n"
-
     msg += f"📊 Score: {r['score']}\n"
-
+    msg += f"📉 Média da categoria: {r.get('market_avg', 0)}% CDI\n"
     msg += f"{r['classification']}\n"
-
     msg += f"{selic_label}\n\n"
-
     return msg
+
 
 def format_change_item(i, change):
     old_item = change["old"]
@@ -346,57 +307,56 @@ def format_change_item(i, change):
     )
 
 
-def build_best_rate_text():
+def build_market_promos_text():
     ranked = build_ranked_data()
+    promo_items = [r for r in ranked if r.get("promo")]
 
-    if not ranked:
-        return "🏆 Nenhuma oportunidade disponível no radar no momento."
-
-    best_rate = max(r["rate"] for r in ranked)
-    best_items = [r for r in ranked if r["rate"] == best_rate]
-
-    msg = "🏆 Melhores taxas do radar no momento\n\n"
-
-    for i, r in enumerate(best_items, 1):
-        msg += format_item(i, r)
-
-    return msg.strip()
-
-
-def build_real_rare_text():
-    ranked = build_ranked_data()
-    rare_items = [r for r in ranked if r.get("rare")]
-
-    if not rare_items:
+    if not promo_items:
         return (
-            "🔥 Nenhuma oportunidade rara real detectada no momento.\n\n"
-            "O radar não encontrou taxa fora do padrão de mercado nesta rodada."
+            "🚨 Nenhuma promoção de mercado detectada no momento.\n\n"
+            "O radar não encontrou ofertas promocionais nas fontes ativas."
         )
 
-    msg = "🔥 Oportunidades raras reais detectadas\n\n"
+    msg = "🚨 Promoções de mercado detectadas\n\n"
 
-    for i, r in enumerate(rare_items[:10], 1):
+    for i, r in enumerate(promo_items[:10], 1):
         msg += format_item(i, r)
 
     return msg.strip()
 
 
-# =========================================================
-# ALERT LOGIC
-# =========================================================
+def build_anomalies_text():
+    ranked = build_ranked_data()
+    anomaly_items = [r for r in ranked if r.get("anomaly")]
+
+    if not anomaly_items:
+        return (
+            "📈 Nenhuma taxa fora da curva detectada no momento.\n\n"
+            "As taxas estão próximas da média das categorias monitoradas."
+        )
+
+    msg = "📈 Taxas fora da curva detectadas\n\n"
+
+    for i, r in enumerate(anomaly_items[:10], 1):
+        msg += format_item(i, r)
+
+    return msg.strip()
+
 
 def is_alert_candidate(r):
-    return bool(r.get("beats_selic")) or bool(r.get("rare")) or bool(r.get("best_rate"))
+    return bool(r.get("promo")) or bool(r.get("anomaly"))
 
 
 def build_alert_message(r):
-    rare_label = "🔥 OPORTUNIDADE RARA REAL\n" if r.get("rare") else ""
+    promo_label = "🚨 PROMOÇÃO DE MERCADO\n" if r.get("promo") else ""
+    anomaly_label = "📈 TAXA FORA DA CURVA\n" if r.get("anomaly") else ""
     best_label = "🏆 MELHOR TAXA DO MERCADO\n" if r.get("best_rate") else ""
     selic_label = "✅ Melhor que Selic\n" if r.get("beats_selic") else ""
 
     return (
-        "🚨 OPORTUNIDADE DETECTADA\n\n"
-        f"{rare_label}"
+        "🔔 ALERTA DO RADAR\n\n"
+        f"{promo_label}"
+        f"{anomaly_label}"
         f"{best_label}"
         f"💼 {r['type']} {r['rate']}% CDI\n"
         f"🏦 Instituição: {r['bank']}\n"
@@ -405,6 +365,7 @@ def build_alert_message(r):
         f"🧾 Retorno bruto estimado: {r['gross']:.2f}% a.a.\n"
         f"💰 Retorno líquido estimado: {r['net']:.2f}% a.a.\n"
         f"📊 Score: {r['score']}\n"
+        f"📉 Média da categoria: {r.get('market_avg', 0)}% CDI\n"
         f"{r['classification']}\n"
         f"{selic_label}"
     )
@@ -484,10 +445,6 @@ async def post_init(application):
     print(f"🟢 Job de alertas agendado a cada {ALERT_INTERVAL_SECONDS} segundos")
 
 
-# =========================================================
-# UI TEXT BUILDERS
-# =========================================================
-
 def register_current_chat(update):
     if update and update.effective_chat:
         set_registered_alert_chat_id(update.effective_chat.id)
@@ -502,10 +459,11 @@ def build_main_menu_text():
         "/about - sobre o radar\n"
         "/fontes - fontes monitoradas\n"
         "/stats - estatísticas do radar\n"
+        "/promocoes - promoções de mercado\n"
+        "/anomalias - taxas fora da curva\n"
         "/novas - novas oportunidades\n"
         "/mudancas - mudanças de taxa\n"
         "/historico - histórico do radar\n"
-        "/raras - oportunidades raras reais\n"
         "/melhortaxa - melhor taxa do radar\n"
         "/ranking - ver ranking\n"
         "/top10 - top 10\n"
@@ -533,17 +491,13 @@ def build_help_text():
         "/status - situação atual do radar e das fontes\n"
         "/fontes - mostra as fontes monitoradas\n"
         "/stats - mostra as estatísticas do radar\n"
+        "/promocoes - mostra promoções de mercado\n"
+        "/anomalias - mostra taxas fora da curva\n"
         "/novas - mostra oportunidades novas detectadas\n"
         "/mudancas - mostra mudanças de taxa detectadas\n"
         "/historico - mostra os últimos eventos do radar\n"
-        "/raras - mostra oportunidades raras reais\n"
         "/melhortaxa - mostra a melhor taxa atual do radar\n"
         "/benchmark - Selic e CDI atuais usados na comparação\n\n"
-        "🔎 Filtros específicos\n"
-        "/diarios - oportunidades com liquidez diária\n"
-        "/curtos - investimentos de curto prazo\n"
-        "/isentos - LCIs e LCAs\n"
-        "/selicplus - investimentos que superam a Selic\n\n"
         "🚨 Alertas automáticos\n"
         "/setalertchat - define este chat para receber alertas\n"
         "/alertastatus - mostra o estado dos alertas automáticos\n"
@@ -560,15 +514,10 @@ def build_about_text():
         "O sistema analisa automaticamente CDBs, LCIs e LCAs de múltiplas fontes públicas "
         "e organiza as melhores oportunidades em um ranking.\n\n"
         "Principais recursos:\n"
+        "• detector de promoções de mercado\n"
+        "• detector de taxa fora da curva\n"
+        "• alerta automático para oportunidades especiais\n"
         "• ranking automático de oportunidades\n"
-        "• score mais inteligente\n"
-        "• detecção de investimentos que superam a Selic\n"
-        "• filtros por liquidez diária e prazo\n"
-        "• identificação de oportunidades raras reais\n"
-        "• melhor taxa do radar no momento\n"
-        "• alertas automáticos\n"
-        "• detecção de novas oportunidades\n"
-        "• detecção de melhoria de taxa\n"
         "• histórico do radar\n\n"
         "Use /menu para acessar todos os comandos do radar."
     )
@@ -580,10 +529,8 @@ def build_sources_text():
 
     source_labels = {
         "yubb": "🔎 Yubb",
-        "public_pages": "🌍 Páginas públicas",
         "investidor10": "📈 Investidor10",
         "maisretorno": "📊 MaisRetorno",
-        "statusinvest": "📉 StatusInvest",
         "fallback": "🧪 Fallback",
     }
 
@@ -636,13 +583,8 @@ def build_stats_text():
     diarios = sum(1 for i in ranked if i.get("type_normalized") == "CDB" and i.get("liquidity"))
     curtos = sum(1 for i in ranked if i.get("type_normalized") == "CDB" and i.get("days", 0) <= 365)
     isentos = sum(1 for i in ranked if i.get("type_normalized") in ["LCI", "LCA"])
-    raras = sum(1 for i in ranked if i.get("rare"))
-
-    if ranked:
-        best_rate = max(i["rate"] for i in ranked)
-        bests = sum(1 for i in ranked if i["rate"] == best_rate)
-    else:
-        bests = 0
+    promos = sum(1 for i in ranked if i.get("promo"))
+    anomalies = sum(1 for i in ranked if i.get("anomaly"))
 
     fontes_ativas = sum(
         1 for source_name, info in source_status.items()
@@ -658,61 +600,49 @@ def build_stats_text():
         f"Liquidez diária: {diarios}\n"
         f"Curto prazo: {curtos}\n"
         f"LCI/LCA (isentos): {isentos}\n"
-        f"Oportunidades raras reais: {raras}\n"
-        f"Melhores taxas marcadas: {bests}"
+        f"Promoções detectadas: {promos}\n"
+        f"Taxas fora da curva: {anomalies}"
     )
 
-
-# =========================================================
-# COMMANDS
-# =========================================================
 
 async def start_cmd(update, context):
     register_current_chat(update)
-    await update.message.reply_text(
-        build_main_menu_text(),
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text(build_main_menu_text(), reply_markup=ReplyKeyboardRemove())
 
 
 async def menu_cmd(update, context):
     register_current_chat(update)
-    await update.message.reply_text(
-        build_main_menu_text(),
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text(build_main_menu_text(), reply_markup=ReplyKeyboardRemove())
 
 
 async def help_cmd(update, context):
     register_current_chat(update)
-    await update.message.reply_text(
-        build_help_text(),
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text(build_help_text(), reply_markup=ReplyKeyboardRemove())
 
 
 async def about_cmd(update, context):
     register_current_chat(update)
-    await update.message.reply_text(
-        build_about_text(),
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text(build_about_text(), reply_markup=ReplyKeyboardRemove())
 
 
 async def fontes_cmd(update, context):
     register_current_chat(update)
-    await update.message.reply_text(
-        build_sources_text(),
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text(build_sources_text(), reply_markup=ReplyKeyboardRemove())
 
 
 async def stats_cmd(update, context):
     register_current_chat(update)
-    await update.message.reply_text(
-        build_stats_text(),
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text(build_stats_text(), reply_markup=ReplyKeyboardRemove())
+
+
+async def promocoes_cmd(update, context):
+    register_current_chat(update)
+    await update.message.reply_text(build_market_promos_text(), reply_markup=ReplyKeyboardRemove())
+
+
+async def anomalias_cmd(update, context):
+    register_current_chat(update)
+    await update.message.reply_text(build_anomalies_text(), reply_markup=ReplyKeyboardRemove())
 
 
 async def novas_cmd(update, context):
@@ -734,10 +664,7 @@ async def novas_cmd(update, context):
     for i, r in enumerate(new_items[:10], 1):
         msg += format_item(i, r)
 
-    await update.message.reply_text(
-        msg,
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove())
 
 
 async def mudancas_cmd(update, context):
@@ -769,10 +696,7 @@ async def mudancas_cmd(update, context):
         for i, change in enumerate(quedas[:10], 1):
             msg += format_change_item(i, change)
 
-    await update.message.reply_text(
-        msg,
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove())
 
 
 async def historico_cmd(update, context):
@@ -782,10 +706,7 @@ async def historico_cmd(update, context):
     events = state.get("events", [])
 
     if not events:
-        await update.message.reply_text(
-            "🕘 Histórico vazio no momento.",
-            reply_markup=ReplyKeyboardRemove()
-        )
+        await update.message.reply_text("🕘 Histórico vazio no momento.", reply_markup=ReplyKeyboardRemove())
         return
 
     last_events = events[-10:]
@@ -816,26 +737,21 @@ async def historico_cmd(update, context):
                 f"✨ Agora: {event.get('new_rate')}% CDI\n\n"
             )
 
-    await update.message.reply_text(
-        msg,
-        reply_markup=ReplyKeyboardRemove()
-    )
-
-
-async def raras_cmd(update, context):
-    register_current_chat(update)
-    await update.message.reply_text(
-        build_real_rare_text(),
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove())
 
 
 async def melhortaxa_cmd(update, context):
     register_current_chat(update)
-    await update.message.reply_text(
-        build_best_rate_text(),
-        reply_markup=ReplyKeyboardRemove()
-    )
+
+    ranked = build_ranked_data()
+    if not ranked:
+        await update.message.reply_text("🏆 Nenhuma oportunidade disponível no radar no momento.")
+        return
+
+    best = ranked[0]
+    msg = "🏆 Melhor taxa do radar no momento\n\n"
+    msg += format_item(1, best)
+    await update.message.reply_text(msg)
 
 
 async def benchmark_cmd(update, context):
@@ -865,10 +781,8 @@ async def status_cmd(update, context):
 
     source_labels = {
         "yubb": "🔎 Yubb",
-        "public_pages": "🌍 Páginas públicas",
         "investidor10": "📈 Investidor10",
         "maisretorno": "📊 MaisRetorno",
-        "statusinvest": "📉 StatusInvest",
         "fallback": "🧪 Fallback",
     }
 
@@ -923,7 +837,7 @@ async def status_cmd(update, context):
         msg += "\n\n"
 
     if fallback_line:
-        msg += f"{fallback_line}"
+        msg += fallback_line
 
     await update.message.reply_text(msg)
 
@@ -1076,16 +990,18 @@ async def testealerta_cmd(update, context):
     sample = {
         "type": "CDB",
         "type_normalized": "CDB",
-        "rate": 125,
+        "rate": 128,
         "bank": "Banco Teste",
         "days": 365,
         "liquidity": True,
-        "gross": 13.31,
-        "net": 11.34,
+        "gross": 13.63,
+        "net": 11.59,
         "score": 12,
         "classification": "🔴 OPORTUNIDADE IMPERDÍVEL",
-        "rare": True,
+        "promo": True,
+        "anomaly": True,
         "best_rate": True,
+        "market_avg": 109.0,
         "beats_selic": True,
     }
 
@@ -1110,10 +1026,11 @@ def main():
     app.add_handler(CommandHandler("about", about_cmd))
     app.add_handler(CommandHandler("fontes", fontes_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_handler(CommandHandler("promocoes", promocoes_cmd))
+    app.add_handler(CommandHandler("anomalias", anomalias_cmd))
     app.add_handler(CommandHandler("novas", novas_cmd))
     app.add_handler(CommandHandler("mudancas", mudancas_cmd))
     app.add_handler(CommandHandler("historico", historico_cmd))
-    app.add_handler(CommandHandler("raras", raras_cmd))
     app.add_handler(CommandHandler("melhortaxa", melhortaxa_cmd))
     app.add_handler(CommandHandler("benchmark", benchmark_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
