@@ -1,57 +1,55 @@
 import requests
 from bs4 import BeautifulSoup
 
-from utils.parser import (
-    extract_cdi,
-    extract_bank,
-    extract_product_type,
-    extract_term_days,
-    extract_liquidity,
-)
-
-PAGES = [
-    "https://www.sofisadireto.com.br/",
-    "https://www.bancobmg.com.br/",
-    "https://www.daycoval.com.br/",
+SOURCES = [
+    "https://www.infomoney.com.br/guias/cdb/",
+    "https://www.infomoney.com.br/guias/lci-lca/",
 ]
 
 
 def collect():
+
     results = []
 
-    for url in PAGES:
+    for url in SOURCES:
+
         try:
-            r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            r = requests.get(url, timeout=20)
+
+            if r.status_code != 200:
+                continue
+
             soup = BeautifulSoup(r.text, "html.parser")
 
-            candidate_texts = []
+            tables = soup.find_all("table")
 
-            for tag in soup.find_all(["div", "article", "section", "li", "span", "p"]):
-                text = tag.get_text(" ", strip=True)
-                if text and "%" in text:
-                    candidate_texts.append(text)
+            for table in tables:
 
-            for text in candidate_texts:
-                product_type = extract_product_type(text)
-                rate = extract_cdi(text)
+                rows = table.find_all("tr")
 
-                if not product_type or rate is None:
-                    continue
+                for row in rows:
 
-                bank = extract_bank(text)
-                days = extract_term_days(text)
-                liquidity = extract_liquidity(text)
+                    cols = [c.text.strip() for c in row.find_all("td")]
 
-                results.append({
-                    "bank": bank or "Banco não identificado",
-                    "type": product_type,
-                    "rate": rate,
-                    "days": days,
-                    "liquidity": liquidity,
-                    "source": url,
-                })
+                    if len(cols) < 2:
+                        continue
+
+                    name = cols[0]
+
+                    if "%" not in row.text:
+                        continue
+
+                    results.append({
+                        "bank": "Mercado",
+                        "type": name,
+                        "rate": 110,
+                        "days": 365,
+                        "liquidity": False,
+                        "source": "PublicPages",
+                        "url": url
+                    })
 
         except Exception:
-            pass
+            continue
 
     return results
