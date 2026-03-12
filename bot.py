@@ -324,11 +324,14 @@ def build_best_rate_text():
     if not ranked:
         return "🏆 Nenhuma oportunidade disponível no radar no momento."
 
-    real_ranked = [r for r in ranked if r.get("bank") != "Simulação Interna"]
-    best = real_ranked[0] if real_ranked else ranked[0]
+    best_rate = max(r["rate"] for r in ranked)
+    best_items = [r for r in ranked if r["rate"] == best_rate]
 
-    msg = "🏆 Melhor taxa do radar no momento\n\n"
-    msg += format_item(1, best)
+    msg = "🏆 Melhores taxas do radar no momento\n\n"
+
+    for i, r in enumerate(best_items, 1):
+        msg += format_item(i, r)
+
     return msg.strip()
 
 
@@ -606,7 +609,12 @@ def build_stats_text():
     curtos = sum(1 for i in ranked if i.get("type_normalized") == "CDB" and i.get("days", 0) <= 365)
     isentos = sum(1 for i in ranked if i.get("type_normalized") in ["LCI", "LCA"])
     raras = sum(1 for i in ranked if i.get("rare"))
-    bests = sum(1 for i in ranked if i.get("best_rate"))
+
+    if ranked:
+        best_rate = max(i["rate"] for i in ranked)
+        bests = sum(1 for i in ranked if i["rate"] == best_rate)
+    else:
+        bests = 0
 
     fontes_ativas = sum(
         1 for source_name, info in source_status.items()
