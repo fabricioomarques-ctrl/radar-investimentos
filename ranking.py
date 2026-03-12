@@ -2,144 +2,215 @@ from utils.calc import gross_return, net_return
 from config import CDI, SELIC
 
 
+PROMO_CDB_RATE = 120.0
+PROMO_ISENTO_RATE = 95.0
+
+ANOMALY_GAP_CDB = 8.0
+ANOMALY_GAP_ISENTO = 5.0
+
+
+def normalize_type(value):
+    text = str(value or "").strip().lower()
+
+    if "lci" in text:
+        return "LCI"
+    if "lca" in text:
+        return "LCA"
+    if "cdb" in text:
+        return "CDB"
+
+    if "dias" in text or "meses" in text or "anos" in text:
+        return "CDB"
+
+    return str(value or "").strip().upper() or "INVESTIMENTO"
+
+
 def classify(score):
-
-    if score >= 10:
-        return "🔥 OPORTUNIDADE EXCEPCIONAL"
-
-    if score >= 8:
+    if score >= 11:
+        return "🔴 OPORTUNIDADE IMPERDÍVEL"
+    elif score >= 8:
         return "🟡 OPORTUNIDADE FORTE"
-
-    if score >= 5:
+    elif score >= 5:
         return "🟢 BOA OPORTUNIDADE"
-
     return "⚪ OPORTUNIDADE PADRÃO"
 
 
-def detect_market_average(data):
+def build_market_averages(items):
+    groups = {}
 
-    if not data:
-        return 0
+    for item in items:
+        inv_type = item.get("type_normalized")
+        rate = float(item.get("rate", 0))
 
-    rates = [i["rate"] for i in data]
+        if inv_type not in groups:
+            groups[inv_type] = []
 
-    return sum(rates) / len(rates)
+        groups[inv_type].append(rate)
+
+    averages = {}
+
+    for inv_type, rates in groups.items():
+        if rates:
+            averages[inv_type] = round(sum(rates) / len(rates), 2)
+        else:
+            averages[inv_type] = 0
+
+    return averages
 
 
-def detect_anomaly(rate, market_avg):
+def mark_best_rates(items):
+    best_by_type = {}
 
-    if market_avg == 0:
+    for item in items:
+        inv_type = item.get("type_normalized")
+        rate = float(item.get("rate", 0))
+
+        if inv_type not in best_by_type or rate > best_by_type[inv_type]:
+            best_by_type[inv_type] = rate
+
+    for item in items:
+        inv_type = item.get("type_normalized")
+        item["best_rate"] = float(item.get("rate", 0)) == best_by_type.get(inv_type, -1)
+
+    return items
+
+
+def detect_promo(item, net=None):
+    inv_type = item.get("type_normalized") or normalize_type(item.get("type"))
+    rate = float(item.get("rate", 0))
+
+    if inv_type == "CDB" and rate >= PROMO_CDB_RATE:
+        return True
+
+    if inv_type in ["LCI", "LCA"] and rate >= PROMO_ISENTO_RATE:
+        return True
+
+    if net is not None and net >= SELIC + 1.5:
+        return True
+
+    return False
+
+
+def detect_anomaly(item, market_avg):
+    inv_type = item.get("type_normalized") or normalize_type(item.get("type"))
+    rate = float(item.get("rate", 0))
+
+    if market_avg <= 0:
         return False
 
-    if rate >= market_avg + 10:
+    if inv_type == "CDB" and rate >= market_avg + ANOMALY_GAP_CDB:
+        return True
+
+    if inv_type in ["LCI", "LCA"] and rate >= market_avg + ANOMALY_GAP_ISENTO:
         return True
 
     return False
 
 
-def rare_opportunity(item, net):
-
-    rate = item["rate"]
-
-    if item["type"] == "CDB":
-
-        if item["liquidity"] and rate >= 108:
-            return True
-
-        if not item["liquidity"] and rate >= 120:
-            return True
-
-    if item["type"] in ["LCI", "LCA"] and rate >= 95:
-        return True
-
-    if net > SELIC + 1.5:
-        return True
-
-    return False
-
-
-def score(item, net, market_avg):
+def score(item, net):
+    inv_type = item.get("type_normalized") or normalize_type(item.get("type"))
+    rate = float(item.get("rate", 0))
+    liquidity = bool(item.get("liquidity", False))
+    days = int(item.get("days", 365))
+    best_rate = bool(item.get("best_rate", False))
+    promo = bool(item.get("promo", False))
+    anomaly = bool(item.get("anomaly", False))
 
     s = 0
 
-    rate = item["rate"]
+    if inv_type in ["LCI", "LCA"]:
+        if rate >= 97:
+            s += 6
+        elif rate >= 95:
+            s += 5
+        elif rate >= 92:
+            s += 4
+        elif rate >= 90:
+            s += 3
+        elif rate >= 85:
+            s += 2
+    else:
+        if rate >= 125:
+            s += 8
+        elif rate >= 120:
+            s += 7
+        elif rate >= 115:
+            s += 6
+        elif rate >= 110:
+            s += 5
+        elif rate >= 105:
+            s += 4
+        elif rate >= 102:
+            s += 2
 
-    if rate >= market_avg + 10:
-        s += 4
+    if liquidity:
+        s += 1.5
 
-    elif rate >= market_avg + 5:
+    if days <= 180:
+        s += 1.5
+    elif days <= 365:
+        s += 1
+    elif days <= 720:
+        s += 0.5
+
+    if net >= SELIC + 1.0:
+        s += 3
+    elif net > SELIC + 0.25:
+        s += 2
+    elif net >= SELIC - 0.25:
+        s += 1
+
+    if best_rate:
+        s += 1.5
+
+    if promo:
         s += 3
 
-    elif rate >= market_avg + 2:
-        s += 2
-
-    elif rate >= market_avg:
-        s += 1
-
-    if item["liquidity"]:
-        s += 1
-
-    if item["days"] <= 365:
-        s += 1
-
-    if net > SELIC:
-        s += 2
-
-    if item.get("rare"):
-        s += 2
-
-    if item.get("best_rate"):
-        s += 2
+    if anomaly:
+        s += 2.5
 
     return round(s, 1)
 
 
-def mark_best_rates(data):
-
-    best_rate = 0
-
-    for i in data:
-
-        if i["rate"] > best_rate:
-            best_rate = i["rate"]
-
-    for i in data:
-
-        if i["rate"] == best_rate:
-            i["best_rate"] = True
-        else:
-            i["best_rate"] = False
-
-    return best_rate
-
-
 def rank(data):
+    items = []
 
-    market_avg = detect_market_average(data)
+    for item in data:
+        item["type_normalized"] = normalize_type(item.get("type"))
 
-    best_rate = mark_best_rates(data)
+        gross = gross_return(item["rate"], CDI)
 
-    for d in data:
+        if item["type_normalized"] in ["LCI", "LCA"]:
+            net = gross
+        else:
+            net = net_return(gross, item["days"])
 
-        gross = gross_return(d["rate"], CDI)
+        item["gross"] = gross
+        item["net"] = net
+        items.append(item)
 
-        net = net_return(gross, d["days"])
+    items = mark_best_rates(items)
+    market_averages = build_market_averages(items)
 
-        d["gross"] = gross
-        d["net"] = net
-
-        d["rare"] = rare_opportunity(d, net)
-
-        d["anomaly"] = detect_anomaly(d["rate"], market_avg)
-
-        d["score"] = score(d, net, market_avg)
-
-        d["beats_selic"] = net > SELIC
-
-        d["classification"] = classify(d["score"])
+    for item in items:
+        inv_type = item["type_normalized"]
+        item["market_avg"] = market_averages.get(inv_type, 0)
+        item["promo"] = detect_promo(item, item["net"])
+        item["anomaly"] = detect_anomaly(item, item["market_avg"])
+        item["beats_selic"] = item["net"] > SELIC
+        item["score"] = score(item, item["net"])
+        item["classification"] = classify(item["score"])
 
     return sorted(
-        data,
-        key=lambda x: (x["score"], x["rate"]),
+        items,
+        key=lambda x: (
+            x.get("promo", False),
+            x.get("anomaly", False),
+            x.get("best_rate", False),
+            x.get("beats_selic", False),
+            x.get("score", 0),
+            x.get("net", 0),
+            x.get("rate", 0)
+        ),
         reverse=True
     )
