@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import unicodedata
 from datetime import datetime
 
 from telegram import ReplyKeyboardRemove
@@ -115,6 +117,14 @@ def save_market_state(state):
     save_json_file(RADAR_MARKET_FILE, state)
 
 
+def slugify_text(text):
+    text = str(text or "").strip().lower()
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text or "produto"
+
+
 def normalize_bank_name(bank):
     bank = str(bank or "").strip().lower()
 
@@ -131,21 +141,31 @@ def normalize_bank_name(bank):
     return aliases.get(bank, bank)
 
 
-def normalize_type_identity(inv_type):
-    text = str(inv_type or "").strip().lower()
+def normalize_product_identity(inv_type):
+    """
+    Mantém uma identidade mais fiel do produto para evitar colapsar
+    oportunidades diferentes em uma só.
 
-    if "lci" in text:
+    Exemplos:
+    - "LCI" -> "LCI"
+    - "LCA" -> "LCA"
+    - "CDB" -> "CDB"
+    - "Até 180 dias" -> "ate_180_dias"
+    - "De 181 a 360 dias" -> "de_181_a_360_dias"
+    """
+    text = str(inv_type or "").strip()
+    lower = text.lower()
+
+    if lower == "lci" or lower.startswith("lci "):
         return "LCI"
-    if "lca" in text:
+
+    if lower == "lca" or lower.startswith("lca "):
         return "LCA"
-    if "cdb" in text:
+
+    if lower == "cdb" or lower.startswith("cdb "):
         return "CDB"
 
-    # Fontes que retornam faixas de prazo como "Até 180 dias"
-    if "dias" in text or "anos" in text or "meses" in text:
-        return "CDB"
-
-    return str(inv_type or "").strip().upper() or "INVESTIMENTO"
+    return slugify_text(text)
 
 
 def normalize_liquidity_flag(value):
@@ -158,16 +178,16 @@ def build_product_key(r):
     - reduzir falsas "novas oportunidades"
     - detectar mudança de taxa no mesmo produto
 
-    Ignoramos a taxa no ID para que a mesma oportunidade com taxa alterada
-    vire mudança de taxa, e não produto totalmente novo.
+    Excluímos a taxa do ID para permitir detectar mudança de taxa.
+    Mantemos a identidade do produto mais fiel para não juntar faixas diferentes.
     """
     bank = normalize_bank_name(r.get("bank"))
-    inv_type = normalize_type_identity(r.get("type"))
+    product_identity = normalize_product_identity(r.get("type"))
     liquidity = normalize_liquidity_flag(r.get("liquidity"))
 
     return "|".join([
         bank,
-        inv_type,
+        product_identity,
         str(liquidity),
     ])
 
@@ -508,7 +528,6 @@ def build_about_text():
 
 
 def build_sources_text():
-    # força uma coleta antes de mostrar as fontes
     build_ranked_data()
     source_status = get_source_status()
 
