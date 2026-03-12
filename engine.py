@@ -2,8 +2,6 @@ from collectors.yubb import collect as collect_yubb
 from collectors.public_pages import collect as collect_public
 from collectors.fallback import get_fallback
 
-# Fontes opcionais futuras:
-# se o arquivo não existir, o sistema continua normal
 try:
     from collectors.maisretorno import collect as collect_maisretorno
 except Exception:
@@ -30,18 +28,67 @@ LAST_SOURCE_STATUS = {
 }
 
 
+def normalize_bank(bank):
+    bank = str(bank or "").strip().lower()
+
+    aliases = {
+        "banco inter": "inter",
+        "inter": "inter",
+        "banco pan": "pan",
+        "pan": "pan",
+        "mercado pago": "mercadopago",
+        "mercadopago": "mercadopago",
+        "mercado": "mercado",
+    }
+
+    return aliases.get(bank, bank)
+
+
+def normalize_type(inv_type):
+    inv_type = str(inv_type or "").strip().upper()
+
+    aliases = {
+        "LCI/LCA": "LCI_LCA",
+        "LCA/LCI": "LCI_LCA",
+    }
+
+    return aliases.get(inv_type, inv_type)
+
+
+def normalize_days(days):
+    try:
+        return int(float(days))
+    except Exception:
+        return 365
+
+
+def normalize_rate(rate):
+    try:
+        return round(float(rate), 2)
+    except Exception:
+        return 0.0
+
+
+def normalize_liquidity(liquidity):
+    return bool(liquidity)
+
+
+def build_dedup_key(item):
+    return (
+        normalize_bank(item.get("bank")),
+        normalize_type(item.get("type")),
+        normalize_rate(item.get("rate")),
+        normalize_days(item.get("days")),
+        normalize_liquidity(item.get("liquidity")),
+    )
+
+
 def deduplicate(data):
     seen = set()
     unique = []
 
     for item in data:
-        key = (
-            item.get("bank"),
-            item.get("type"),
-            item.get("rate"),
-            item.get("days"),
-            item.get("liquidity"),
-        )
+        key = build_dedup_key(item)
 
         if key not in seen:
             seen.add(key)
@@ -61,6 +108,13 @@ def _collect_from_source(source_name, collector_fn, data):
 
     try:
         items = collector_fn()
+
+        if not isinstance(items, list):
+            LAST_SOURCE_STATUS[source_name]["ok"] = False
+            LAST_SOURCE_STATUS[source_name]["count"] = 0
+            LAST_SOURCE_STATUS[source_name]["error"] = "coletor retornou formato inválido"
+            return
+
         data.extend(items)
 
         LAST_SOURCE_STATUS[source_name]["ok"] = True
