@@ -142,17 +142,6 @@ def normalize_bank_name(bank):
 
 
 def normalize_product_identity(inv_type):
-    """
-    Mantém uma identidade mais fiel do produto para evitar colapsar
-    oportunidades diferentes em uma só.
-
-    Exemplos:
-    - "LCI" -> "LCI"
-    - "LCA" -> "LCA"
-    - "CDB" -> "CDB"
-    - "Até 180 dias" -> "ate_180_dias"
-    - "De 181 a 360 dias" -> "de_181_a_360_dias"
-    """
     text = str(inv_type or "").strip()
     lower = text.lower()
 
@@ -173,14 +162,6 @@ def normalize_liquidity_flag(value):
 
 
 def build_product_key(r):
-    """
-    ID estável da oportunidade para:
-    - reduzir falsas "novas oportunidades"
-    - detectar mudança de taxa no mesmo produto
-
-    Excluímos a taxa do ID para permitir detectar mudança de taxa.
-    Mantemos a identidade do produto mais fiel para não juntar faixas diferentes.
-    """
     bank = normalize_bank_name(r.get("bank"))
     product_identity = normalize_product_identity(r.get("type"))
     liquidity = normalize_liquidity_flag(r.get("liquidity"))
@@ -214,6 +195,7 @@ def snapshot_from_item(r):
         "score": r.get("score"),
         "classification": r.get("classification"),
         "rare": r.get("rare"),
+        "best_rate": r.get("best_rate"),
         "beats_selic": r.get("beats_selic"),
     }
 
@@ -229,13 +211,6 @@ def append_market_event(state, event, max_events=200):
 
 
 def scan_market_changes(ranked):
-    """
-    Compara a rodada atual com o estado salvo e detecta:
-    - novas oportunidades
-    - mudanças de taxa
-
-    Também atualiza o arquivo de estado do radar.
-    """
     state = load_market_state()
     old_products = state.get("products", {})
     new_products = {}
@@ -306,11 +281,12 @@ def build_ranked_data():
 
 def format_item(i, r):
     sim_label = "🧪 Dado de exemplo\n" if r.get("bank") == "Simulação Interna" else ""
-    rare_label = "🔥 OPORTUNIDADE RARA\n" if r.get("rare") else ""
+    rare_label = "🔥 OPORTUNIDADE RARA REAL\n" if r.get("rare") else ""
+    best_label = "🏆 MELHOR TAXA DO MERCADO\n" if r.get("best_rate") else ""
     selic_label = "✅ Melhor que Selic" if r.get("beats_selic") else "➖ Não supera a Selic"
 
     msg = ""
-    msg += f"{sim_label}{rare_label}{i}️⃣ {r['type']} {r['rate']}% CDI\n"
+    msg += f"{sim_label}{rare_label}{best_label}{i}️⃣ {r['type']} {r['rate']}% CDI\n"
     msg += f"🏦 Instituição: {r['bank']}\n"
     msg += f"📅 Prazo: {r['days']} dias\n"
     msg += f"💧 Liquidez diária: {'Sim' if r['liquidity'] else 'Não'}\n"
@@ -329,7 +305,7 @@ def format_change_item(i, change):
     old_rate = old_item.get("rate")
     new_rate = new_item.get("rate")
 
-    direction = "📈 TAXA MELHOROU" if new_rate > old_rate else "📉 TAXA MUDOU"
+    direction = "📈 TAXA MELHOROU" if new_rate > old_rate else "📉 TAXA PIOROU"
 
     return (
         f"{i}️⃣ {direction}\n"
@@ -342,21 +318,55 @@ def format_change_item(i, change):
     )
 
 
+def build_best_rate_text():
+    ranked = build_ranked_data()
+
+    if not ranked:
+        return "🏆 Nenhuma oportunidade disponível no radar no momento."
+
+    real_ranked = [r for r in ranked if r.get("bank") != "Simulação Interna"]
+    best = real_ranked[0] if real_ranked else ranked[0]
+
+    msg = "🏆 Melhor taxa do radar no momento\n\n"
+    msg += format_item(1, best)
+    return msg.strip()
+
+
+def build_real_rare_text():
+    ranked = build_ranked_data()
+    rare_items = [r for r in ranked if r.get("rare")]
+
+    if not rare_items:
+        return (
+            "🔥 Nenhuma oportunidade rara real detectada no momento.\n\n"
+            "O radar não encontrou taxa fora do padrão de mercado nesta rodada."
+        )
+
+    msg = "🔥 Oportunidades raras reais detectadas\n\n"
+
+    for i, r in enumerate(rare_items[:10], 1):
+        msg += format_item(i, r)
+
+    return msg.strip()
+
+
 # =========================================================
 # ALERT LOGIC
 # =========================================================
 
 def is_alert_candidate(r):
-    return bool(r.get("beats_selic")) or bool(r.get("rare"))
+    return bool(r.get("beats_selic")) or bool(r.get("rare")) or bool(r.get("best_rate"))
 
 
 def build_alert_message(r):
-    rare_label = "🔥 OPORTUNIDADE RARA\n" if r.get("rare") else ""
+    rare_label = "🔥 OPORTUNIDADE RARA REAL\n" if r.get("rare") else ""
+    best_label = "🏆 MELHOR TAXA DO MERCADO\n" if r.get("best_rate") else ""
     selic_label = "✅ Melhor que Selic\n" if r.get("beats_selic") else ""
 
     return (
         "🚨 OPORTUNIDADE DETECTADA\n\n"
         f"{rare_label}"
+        f"{best_label}"
         f"💼 {r['type']} {r['rate']}% CDI\n"
         f"🏦 Instituição: {r['bank']}\n"
         f"📅 Prazo: {r['days']} dias\n"
@@ -464,6 +474,8 @@ def build_main_menu_text():
         "/novas - novas oportunidades\n"
         "/mudancas - mudanças de taxa\n"
         "/historico - histórico do radar\n"
+        "/raras - oportunidades raras reais\n"
+        "/melhortaxa - melhor taxa do radar\n"
         "/ranking - ver ranking\n"
         "/top10 - top 10\n"
         "/status - ver status\n"
@@ -493,6 +505,8 @@ def build_help_text():
         "/novas - mostra oportunidades novas detectadas\n"
         "/mudancas - mostra mudanças de taxa detectadas\n"
         "/historico - mostra os últimos eventos do radar\n"
+        "/raras - mostra oportunidades raras reais\n"
+        "/melhortaxa - mostra a melhor taxa atual do radar\n"
         "/benchmark - Selic e CDI atuais usados na comparação\n\n"
         "🔎 Filtros específicos\n"
         "/diarios - oportunidades com liquidez diária\n"
@@ -516,12 +530,14 @@ def build_about_text():
         "e organiza as melhores oportunidades em um ranking.\n\n"
         "Principais recursos:\n"
         "• ranking automático de oportunidades\n"
+        "• score mais inteligente\n"
         "• detecção de investimentos que superam a Selic\n"
         "• filtros por liquidez diária e prazo\n"
-        "• identificação de oportunidades raras\n"
+        "• identificação de oportunidades raras reais\n"
+        "• melhor taxa do radar no momento\n"
         "• alertas automáticos\n"
         "• detecção de novas oportunidades\n"
-        "• detecção de mudança de taxa\n"
+        "• detecção de melhoria de taxa\n"
         "• histórico do radar\n\n"
         "Use /menu para acessar todos os comandos do radar."
     )
@@ -586,10 +602,11 @@ def build_stats_text():
     total = len(ranked)
     reais = sum(1 for i in ranked if i.get("bank") != "Simulação Interna")
     beats_selic = sum(1 for i in ranked if i.get("net", 0) > SELIC)
-    diarios = sum(1 for i in ranked if i.get("type") == "CDB" and i.get("liquidity"))
-    curtos = sum(1 for i in ranked if i.get("type") == "CDB" and i.get("days", 0) <= 365)
-    isentos = sum(1 for i in ranked if i.get("type") in ["LCI", "LCA"])
+    diarios = sum(1 for i in ranked if i.get("type_normalized") == "CDB" and i.get("liquidity"))
+    curtos = sum(1 for i in ranked if i.get("type_normalized") == "CDB" and i.get("days", 0) <= 365)
+    isentos = sum(1 for i in ranked if i.get("type_normalized") in ["LCI", "LCA"])
     raras = sum(1 for i in ranked if i.get("rare"))
+    bests = sum(1 for i in ranked if i.get("best_rate"))
 
     fontes_ativas = sum(
         1 for source_name, info in source_status.items()
@@ -605,7 +622,8 @@ def build_stats_text():
         f"Liquidez diária: {diarios}\n"
         f"Curto prazo: {curtos}\n"
         f"LCI/LCA (isentos): {isentos}\n"
-        f"Oportunidades raras: {raras}"
+        f"Oportunidades raras reais: {raras}\n"
+        f"Melhores taxas marcadas: {bests}"
     )
 
 
@@ -669,7 +687,8 @@ async def novas_cmd(update, context):
 
     if not new_items:
         await update.message.reply_text(
-            "🆕 Nenhuma nova oportunidade detectada no momento.",
+            "🆕 Nenhuma nova oportunidade detectada no momento.\n\n"
+            "O radar já analisou todas as oportunidades disponíveis nas fontes.",
             reply_markup=ReplyKeyboardRemove()
         )
         return
@@ -693,15 +712,26 @@ async def mudancas_cmd(update, context):
 
     if not changed_items:
         await update.message.reply_text(
-            "📉 Nenhuma mudança de taxa detectada no momento.",
+            "📉 Nenhuma mudança de taxa detectada no momento.\n\n"
+            "As oportunidades monitoradas permanecem com as mesmas condições.",
             reply_markup=ReplyKeyboardRemove()
         )
         return
 
+    melhorias = [c for c in changed_items if c["new"].get("rate", 0) > c["old"].get("rate", 0)]
+    quedas = [c for c in changed_items if c["new"].get("rate", 0) < c["old"].get("rate", 0)]
+
     msg = "📈 Mudanças de taxa detectadas\n\n"
 
-    for i, change in enumerate(changed_items[:10], 1):
-        msg += format_change_item(i, change)
+    if melhorias:
+        msg += "✅ Melhorias de taxa\n\n"
+        for i, change in enumerate(melhorias[:10], 1):
+            msg += format_change_item(i, change)
+
+    if quedas:
+        msg += "⚠️ Quedas de taxa\n\n"
+        for i, change in enumerate(quedas[:10], 1):
+            msg += format_change_item(i, change)
 
     await update.message.reply_text(
         msg,
@@ -740,8 +770,9 @@ async def historico_cmd(update, context):
                 f"🏦 {item.get('bank')}\n\n"
             )
         elif kind == "rate_change":
+            direction = "📈 Melhoria de taxa" if event.get("new_rate", 0) > event.get("old_rate", 0) else "📉 Queda de taxa"
             msg += (
-                f"{i}️⃣ 📈 Mudança de taxa\n"
+                f"{i}️⃣ {direction}\n"
                 f"🕒 {timestamp}\n"
                 f"💼 {item.get('type')}\n"
                 f"🏦 {item.get('bank')}\n"
@@ -751,6 +782,22 @@ async def historico_cmd(update, context):
 
     await update.message.reply_text(
         msg,
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+
+async def raras_cmd(update, context):
+    register_current_chat(update)
+    await update.message.reply_text(
+        build_real_rare_text(),
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+
+async def melhortaxa_cmd(update, context):
+    register_current_chat(update)
+    await update.message.reply_text(
+        build_best_rate_text(),
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -776,9 +823,9 @@ async def status_cmd(update, context):
     sim_count = sum(1 for i in ranked if i.get("bank") == "Simulação Interna")
 
     beats_selic = sum(1 for i in ranked if i.get("net", 0) > SELIC)
-    diarios = sum(1 for i in ranked if i.get("type") == "CDB" and i.get("liquidity"))
-    curtos = sum(1 for i in ranked if i.get("type") == "CDB" and i.get("days", 0) <= 365)
-    isentos = sum(1 for i in ranked if i.get("type") in ["LCI", "LCA"])
+    diarios = sum(1 for i in ranked if i.get("type_normalized") == "CDB" and i.get("liquidity"))
+    curtos = sum(1 for i in ranked if i.get("type_normalized") == "CDB" and i.get("days", 0) <= 365)
+    isentos = sum(1 for i in ranked if i.get("type_normalized") in ["LCI", "LCA"])
 
     source_labels = {
         "yubb": "🔎 Yubb",
@@ -873,7 +920,7 @@ async def diarios_cmd(update, context):
     register_current_chat(update)
 
     ranked = build_ranked_data()
-    diarios = [r for r in ranked if r.get("type") == "CDB" and r.get("liquidity")]
+    diarios = [r for r in ranked if r.get("type_normalized") == "CDB" and r.get("liquidity")]
 
     if not diarios:
         await update.message.reply_text(
@@ -893,7 +940,7 @@ async def curtos_cmd(update, context):
     register_current_chat(update)
 
     ranked = build_ranked_data()
-    curtos = [r for r in ranked if r.get("type") == "CDB" and r.get("days", 0) <= 365]
+    curtos = [r for r in ranked if r.get("type_normalized") == "CDB" and r.get("days", 0) <= 365]
 
     if not curtos:
         await update.message.reply_text(
@@ -913,7 +960,7 @@ async def isentos_cmd(update, context):
     register_current_chat(update)
 
     ranked = build_ranked_data()
-    isentos = [r for r in ranked if r.get("type") in ["LCI", "LCA"]]
+    isentos = [r for r in ranked if r.get("type_normalized") in ["LCI", "LCA"]]
 
     if not isentos:
         await update.message.reply_text(
@@ -992,25 +1039,23 @@ async def testealerta_cmd(update, context):
 
     sample = {
         "type": "CDB",
-        "rate": 120,
+        "type_normalized": "CDB",
+        "rate": 125,
         "bank": "Banco Teste",
         "days": 365,
         "liquidity": True,
-        "gross": 12.78,
-        "net": 10.90,
-        "score": 9,
+        "gross": 13.31,
+        "net": 11.34,
+        "score": 12,
         "classification": "🔴 OPORTUNIDADE IMPERDÍVEL",
         "rare": True,
+        "best_rate": True,
         "beats_selic": True,
     }
 
     msg = build_alert_message(sample)
     await update.message.reply_text(msg)
 
-
-# =========================================================
-# MAIN
-# =========================================================
 
 def main():
     if not TELEGRAM_BOT_TOKEN:
@@ -1032,6 +1077,8 @@ def main():
     app.add_handler(CommandHandler("novas", novas_cmd))
     app.add_handler(CommandHandler("mudancas", mudancas_cmd))
     app.add_handler(CommandHandler("historico", historico_cmd))
+    app.add_handler(CommandHandler("raras", raras_cmd))
+    app.add_handler(CommandHandler("melhortaxa", melhortaxa_cmd))
     app.add_handler(CommandHandler("benchmark", benchmark_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ranking", ranking_cmd))
