@@ -1,8 +1,110 @@
+import json
+import os
+from datetime import datetime
+
 from telegram.ext import Application, CommandHandler
-from config import TELEGRAM_BOT_TOKEN, BOT_NAME, SELIC, CDI
+import config
 from engine import collect_all, get_source_status
 from ranking import rank
 
+
+# =========================================================
+# CONFIGURAÇÕES LOCAIS DO BOT
+# =========================================================
+
+ALERTS_SENT_FILE = "alerts_sent.json"
+ALERT_RUNTIME_FILE = "alert_runtime.json"
+
+ALERT_INTERVAL_SECONDS = getattr(config, "ALERT_INTERVAL_SECONDS", 1800)  # 30 min
+MAX_ALERTS_PER_CYCLE = getattr(config, "MAX_ALERTS_PER_CYCLE", 3)
+
+TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN
+BOT_NAME = config.BOT_NAME
+SELIC = config.SELIC
+CDI = config.CDI
+
+
+# =========================================================
+# UTILITÁRIOS JSON
+# =========================================================
+
+def load_json_file(path, default):
+    if not os.path.exists(path):
+        return default
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def save_json_file(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+# =========================================================
+# ALERTAS - ESTADO E CACHE
+# =========================================================
+
+def load_alert_cache():
+    return load_json_file(
+        ALERTS_SENT_FILE,
+        {
+            "sent_ids": [],
+            "last_cleanup": datetime.now().strftime("%Y-%m-%d")
+        }
+    )
+
+
+def save_alert_cache(cache):
+    save_json_file(ALERTS_SENT_FILE, cache)
+
+
+def cleanup_alert_cache(cache, max_size=2000):
+    sent_ids = cache.get("sent_ids", [])
+
+    if len(sent_ids) > max_size:
+        cache["sent_ids"] = sent_ids[-max_size:]
+
+    cache["last_cleanup"] = datetime.now().strftime("%Y-%m-%d")
+    return cache
+
+
+def load_alert_runtime():
+    return load_json_file(
+        ALERT_RUNTIME_FILE,
+        {
+            "alert_chat_id": None,
+            "last_run": None,
+            "last_total_ranked": 0,
+            "last_candidates": 0,
+            "last_sent_count": 0,
+            "last_error": "",
+            "last_alert_preview": ""
+        }
+    )
+
+
+def save_alert_runtime(runtime_data):
+    save_json_file(ALERT_RUNTIME_FILE, runtime_data)
+
+
+def get_registered_alert_chat_id():
+    runtime_data = load_alert_runtime()
+    return runtime_data.get("alert_chat_id")
+
+
+def set_registered_alert_chat_id(chat_id):
+    runtime_data = load_alert_runtime()
+    runtime_data["alert_chat_id"] = str(chat_id)
+    save_alert_runtime(runtime_data)
+
+
+# =========================================================
+# DADOS / RANKING
+# =========================================================
 
 def build_ranked_data():
     data = collect_all()
@@ -28,7 +130,164 @@ def format_item(i, r):
     return msg
 
 
+def build_alert_id(r):
+    """
+    ID estável para anti-alerta repetido.
+    Mantém alinhamento com a deduplicação do engine.py,
+    mas em formato string para persistência.
+    """
+    return "|".join([
+        str(r.get("bank", "")),
+        str(r.get("type", "")),
+        str(r.get("rate", "")),
+        str(r.get("days", "")),
+        str(r.get("liquidity", "")),
+    ])
+
+
+def is_alert_candidate(r):
+    """
+    Critério do alerta automático:
+    - qualquer oportunidade que bata a Selic
+    - ou qualquer oportunidade marcada como rara
+    """
+    return bool(r.get("beats_selic")) or bool(r.get("rare"))
+
+
+def build_alert_message(r):
+    rare_label = "🔥 OPORTUNIDADE RARA\n" if r.get("rare") else ""
+    selic_label = "✅ Melhor que Selic\n" if r.get("beats_selic") else ""
+
+    return (
+        "🚨 OPORTUNIDADE DETECTADA\n\n"
+        f"{rare_label}"
+        f"💼 {r['type']} {r['rate']}% CDI\n"
+        f"🏦 Instituição: {r['bank']}\n"
+        f"📅 Prazo: {r['days']} dias\n"
+        f"💧 Liquidez diária: {'Sim' if r['liquidity'] else 'Não'}\n"
+        f"🧾 Retorno bruto estimado: {r['gross']:.2f}% a.a.\n"
+        f"💰 Retorno líquido estimado: {r['net']:.2f}% a.a.\n"
+        f"📊 Score: {r['score']}\n"
+        f"{r['classification']}\n"
+        f"{selic_label}"
+    )
+
+
+# =========================================================
+# ALERTAS AUTOMÁTICOS
+# =========================================================
+
+async def process_automatic_alerts(application):
+    runtime_data = load_alert_runtime()
+
+    try:
+        chat_id = runtime_data.get("alert_chat_id")
+        if not chat_id:
+            runtime_data["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            runtime_data["last_error"] = "nenhum chat de alerta registrado"
+            runtime_data["last_sent_count"] = 0
+            save_alert_runtime(runtime_data)
+            return
+
+        ranked = build_ranked_data()
+        candidates = [r for r in ranked if is_alert_candidate(r)]
+
+        cache = load_alert_cache()
+        sent_ids = set(cache.get("sent_ids", []))
+
+        new_candidates = []
+        for r in candidates:
+            aid = build_alert_id(r)
+            if aid not in sent_ids:
+                new_candidates.append(r)
+
+        new_candidates = new_candidates[:MAX_ALERTS_PER_CYCLE]
+
+        sent_count = 0
+        last_alert_preview = ""
+
+        for r in new_candidates:
+            msg = build_alert_message(r)
+            await application.bot.send_message(chat_id=chat_id, text=msg)
+
+            sent_ids.add(build_alert_id(r))
+            sent_count += 1
+            last_alert_preview = f"{r['type']} {r['rate']}% CDI | {r['bank']}"
+
+        cache["sent_ids"] = list(sent_ids)
+        cache = cleanup_alert_cache(cache)
+        save_alert_cache(cache)
+
+        runtime_data["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        runtime_data["last_total_ranked"] = len(ranked)
+        runtime_data["last_candidates"] = len(candidates)
+        runtime_data["last_sent_count"] = sent_count
+        runtime_data["last_error"] = ""
+        runtime_data["last_alert_preview"] = last_alert_preview
+        save_alert_runtime(runtime_data)
+
+    except Exception as e:
+        runtime_data["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        runtime_data["last_error"] = str(e)
+        runtime_data["last_sent_count"] = 0
+        save_alert_runtime(runtime_data)
+
+
+async def alert_job(context):
+    await process_automatic_alerts(context.application)
+
+
+async def post_init(application):
+    if application.job_queue is None:
+        print("⚠️ JobQueue não disponível. Alertas automáticos não serão agendados.")
+        return
+
+    application.job_queue.run_repeating(
+        alert_job,
+        interval=ALERT_INTERVAL_SECONDS,
+        first=15,
+        name="automatic_alert_job"
+    )
+    print(f"🟢 Job de alertas agendado a cada {ALERT_INTERVAL_SECONDS} segundos")
+
+
+# =========================================================
+# REGISTRO DO CHAT DE ALERTA
+# =========================================================
+
+def register_current_chat(update):
+    if update and update.effective_chat:
+        set_registered_alert_chat_id(update.effective_chat.id)
+
+
+# =========================================================
+# COMANDOS TELEGRAM
+# =========================================================
+
 async def start_cmd(update, context):
+    register_current_chat(update)
+
+    msg = (
+        f"💰 {BOT_NAME}\n\n"
+        "/menu - ver menu completo\n"
+        "/ranking - ver ranking\n"
+        "/top10 - top 10\n"
+        "/diarios - CDB liquidez diária\n"
+        "/curtos - CDB curto prazo\n"
+        "/isentos - LCI/LCA\n"
+        "/selicplus - melhores que Selic\n"
+        "/benchmark - ver benchmark\n"
+        "/status - ver status\n"
+        "/alertastatus - status dos alertas\n"
+        "/testealerta - enviar alerta de teste\n"
+        "/setalertchat - registrar este chat para alertas automáticos"
+    )
+    await update.message.reply_text(msg)
+
+
+async def menu_cmd(update, context):
+    register_current_chat(update)
+
     msg = (
         f"💰 {BOT_NAME}\n\n"
         "/ranking - ver ranking\n"
@@ -38,12 +297,17 @@ async def start_cmd(update, context):
         "/isentos - LCI/LCA\n"
         "/selicplus - melhores que Selic\n"
         "/benchmark - ver benchmark\n"
-        "/status - ver status"
+        "/status - ver status\n"
+        "/alertastatus - status dos alertas\n"
+        "/testealerta - enviar alerta de teste\n"
+        "/setalertchat - registrar este chat para alertas automáticos"
     )
     await update.message.reply_text(msg)
 
 
 async def benchmark_cmd(update, context):
+    register_current_chat(update)
+
     msg = (
         "🏦 Benchmark\n\n"
         f"Tesouro Selic: {SELIC:.2f}%\n"
@@ -53,6 +317,8 @@ async def benchmark_cmd(update, context):
 
 
 async def status_cmd(update, context):
+    register_current_chat(update)
+
     ranked = build_ranked_data()
     source_status = get_source_status()
 
@@ -66,6 +332,7 @@ async def status_cmd(update, context):
 
     yubb_status = source_status.get("yubb", {})
     public_status = source_status.get("public_pages", {})
+    fallback_status = source_status.get("fallback", {})
 
     msg = (
         f"🟢 {BOT_NAME} online\n\n"
@@ -79,7 +346,8 @@ async def status_cmd(update, context):
         f"⏱ Curto prazo: {curtos}\n"
         f"🟢 Isentos (LCI/LCA): {isentos}\n\n"
         f"🔎 Yubb: {yubb_status.get('count', 0)}\n"
-        f"🌍 Páginas públicas: {public_status.get('count', 0)}"
+        f"🌍 Páginas públicas: {public_status.get('count', 0)}\n"
+        f"🧪 Fallback: {fallback_status.get('count', 0)}"
     )
 
     if yubb_status.get("error"):
@@ -88,10 +356,15 @@ async def status_cmd(update, context):
     if public_status.get("error"):
         msg += f"\n⚠️ Públicas: {str(public_status['error'])[:180]}"
 
+    if fallback_status.get("error"):
+        msg += f"\n⚠️ Fallback: {str(fallback_status['error'])[:180]}"
+
     await update.message.reply_text(msg)
 
 
 async def ranking_cmd(update, context):
+    register_current_chat(update)
+
     ranked = build_ranked_data()
 
     msg = "🏆 Ranking de oportunidades\n\n"
@@ -102,6 +375,8 @@ async def ranking_cmd(update, context):
 
 
 async def top10_cmd(update, context):
+    register_current_chat(update)
+
     ranked = build_ranked_data()
 
     msg = "🔝 Top 10 oportunidades\n\n"
@@ -112,6 +387,8 @@ async def top10_cmd(update, context):
 
 
 async def diarios_cmd(update, context):
+    register_current_chat(update)
+
     ranked = build_ranked_data()
     diarios = [r for r in ranked if r.get("type") == "CDB" and r.get("liquidity")]
 
@@ -127,6 +404,8 @@ async def diarios_cmd(update, context):
 
 
 async def curtos_cmd(update, context):
+    register_current_chat(update)
+
     ranked = build_ranked_data()
     curtos = [r for r in ranked if r.get("type") == "CDB" and r.get("days", 0) <= 365]
 
@@ -142,6 +421,8 @@ async def curtos_cmd(update, context):
 
 
 async def isentos_cmd(update, context):
+    register_current_chat(update)
+
     ranked = build_ranked_data()
     isentos = [r for r in ranked if r.get("type") in ["LCI", "LCA"]]
 
@@ -157,6 +438,8 @@ async def isentos_cmd(update, context):
 
 
 async def selicplus_cmd(update, context):
+    register_current_chat(update)
+
     ranked = build_ranked_data()
     selicplus = [r for r in ranked if r.get("net", 0) > SELIC]
 
@@ -171,13 +454,82 @@ async def selicplus_cmd(update, context):
     await update.message.reply_text(msg)
 
 
+async def setalertchat_cmd(update, context):
+    register_current_chat(update)
+    chat_id = update.effective_chat.id
+
+    msg = (
+        "✅ Chat de alertas registrado com sucesso.\n\n"
+        f"Chat ID atual: {chat_id}\n"
+        f"Os alertas automáticos passarão a ser enviados aqui "
+        f"a cada {ALERT_INTERVAL_SECONDS // 60} minutos."
+    )
+    await update.message.reply_text(msg)
+
+
+async def alertastatus_cmd(update, context):
+    register_current_chat(update)
+
+    runtime_data = load_alert_runtime()
+    cache = load_alert_cache()
+    registered_chat_id = runtime_data.get("alert_chat_id")
+
+    msg = (
+        "🚨 Status dos alertas automáticos\n\n"
+        f"📍 Chat registrado: {registered_chat_id or 'não definido'}\n"
+        f"⏱ Intervalo: {ALERT_INTERVAL_SECONDS} segundos\n"
+        f"📦 IDs no cache anti-repetição: {len(cache.get('sent_ids', []))}\n"
+        f"🕒 Última execução: {runtime_data.get('last_run') or 'ainda não executou'}\n"
+        f"📊 Último total ranqueado: {runtime_data.get('last_total_ranked', 0)}\n"
+        f"🎯 Últimos candidatos: {runtime_data.get('last_candidates', 0)}\n"
+        f"📨 Últimos alertas enviados: {runtime_data.get('last_sent_count', 0)}\n"
+        f"🔔 Último alerta: {runtime_data.get('last_alert_preview') or 'nenhum'}"
+    )
+
+    if runtime_data.get("last_error"):
+        msg += f"\n\n⚠️ Último erro: {runtime_data['last_error'][:250]}"
+
+    await update.message.reply_text(msg)
+
+
+async def testealerta_cmd(update, context):
+    register_current_chat(update)
+
+    sample = {
+        "type": "CDB",
+        "rate": 120,
+        "bank": "Banco Teste",
+        "days": 365,
+        "liquidity": True,
+        "gross": 12.78,
+        "net": 10.90,
+        "score": 9,
+        "classification": "🔴 OPORTUNIDADE IMPERDÍVEL",
+        "rare": True,
+        "beats_selic": True,
+    }
+
+    msg = build_alert_message(sample)
+    await update.message.reply_text(msg)
+
+
+# =========================================================
+# MAIN
+# =========================================================
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         raise ValueError("Defina TELEGRAM_BOT_TOKEN nas variáveis do Railway.")
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("benchmark", benchmark_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ranking", ranking_cmd))
@@ -186,7 +538,11 @@ def main():
     app.add_handler(CommandHandler("curtos", curtos_cmd))
     app.add_handler(CommandHandler("isentos", isentos_cmd))
     app.add_handler(CommandHandler("selicplus", selicplus_cmd))
+    app.add_handler(CommandHandler("setalertchat", setalertchat_cmd))
+    app.add_handler(CommandHandler("alertastatus", alertastatus_cmd))
+    app.add_handler(CommandHandler("testealerta", testealerta_cmd))
 
+    print(f"🟢 {BOT_NAME} online")
     app.run_polling()
 
 
