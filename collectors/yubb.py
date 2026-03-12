@@ -1,6 +1,13 @@
 import requests
+from bs4 import BeautifulSoup
 
-API_URL = "https://api.yubb.com.br/investments/fixed-income"
+
+URL = "https://yubb.com.br/investimentos/renda-fixa"
+
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
 
 
 def collect():
@@ -9,48 +16,43 @@ def collect():
 
     try:
 
-        r = requests.get(API_URL, timeout=20)
+        r = requests.get(URL, headers=HEADERS, timeout=20)
 
         if r.status_code != 200:
             return []
 
-        data = r.json()
+        soup = BeautifulSoup(r.text, "html.parser")
 
-        for item in data:
+        text = soup.get_text(" ", strip=True)
 
-            bank = item.get("bank")
+        words = text.split()
 
-            if not bank:
-                bank = item.get("issuer", "Mercado")
+        for i, w in enumerate(words):
 
-            inv_type = item.get("type", "CDB")
+            if "%CDI" in w.upper() or "% CDI" in w.upper():
 
-            rate = item.get("rate")
+                try:
 
-            if not rate:
-                continue
+                    rate = float(
+                        w.replace("%", "")
+                        .replace("CDI", "")
+                        .replace(",", ".")
+                    )
 
-            term = item.get("term", 365)
+                except:
+                    continue
 
-            liquidity = item.get("liquidity", False)
+                results.append({
 
-            results.append({
+                    "bank": "Mercado",
+                    "type": "CDB",
+                    "rate": rate,
+                    "days": 365,
+                    "liquidity": False,
+                    "source": "Yubb",
+                    "url": URL
 
-                "bank": bank,
-
-                "type": inv_type,
-
-                "rate": float(rate),
-
-                "days": int(term),
-
-                "liquidity": bool(liquidity),
-
-                "source": "Yubb",
-
-                "url": "https://yubb.com.br/investimentos/renda-fixa"
-
-            })
+                })
 
     except Exception:
 
