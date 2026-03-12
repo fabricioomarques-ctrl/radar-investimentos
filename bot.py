@@ -11,7 +11,7 @@ from ranking import rank
 
 ALERTS_SENT_FILE = "alerts_sent.json"
 ALERT_RUNTIME_FILE = "alert_runtime.json"
-RADAR_SEEN_FILE = "radar_seen.json"
+RADAR_MARKET_FILE = "radar_market_state.json"
 
 ALERT_INTERVAL_SECONDS = getattr(config, "ALERT_INTERVAL_SECONDS", 1800)
 MAX_ALERTS_PER_CYCLE = getattr(config, "MAX_ALERTS_PER_CYCLE", 3)
@@ -21,6 +21,10 @@ BOT_NAME = config.BOT_NAME
 SELIC = config.SELIC
 CDI = config.CDI
 
+
+# =========================================================
+# JSON HELPERS
+# =========================================================
 
 def load_json_file(path, default):
     if not os.path.exists(path):
@@ -37,6 +41,10 @@ def save_json_file(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+
+# =========================================================
+# ALERT CACHE / RUNTIME
+# =========================================================
 
 def load_alert_cache():
     return load_json_file(
@@ -81,25 +89,191 @@ def save_alert_runtime(runtime_data):
     save_json_file(ALERT_RUNTIME_FILE, runtime_data)
 
 
-def load_radar_seen():
-    return load_json_file(
-        RADAR_SEEN_FILE,
-        {
-            "seen_ids": [],
-            "last_update": None
-        }
-    )
-
-
-def save_radar_seen(data):
-    save_json_file(RADAR_SEEN_FILE, data)
-
-
 def set_registered_alert_chat_id(chat_id):
     runtime_data = load_alert_runtime()
     runtime_data["alert_chat_id"] = str(chat_id)
     save_alert_runtime(runtime_data)
 
+
+# =========================================================
+# RADAR MARKET STATE
+# =========================================================
+
+def load_market_state():
+    return load_json_file(
+        RADAR_MARKET_FILE,
+        {
+            "products": {},
+            "events": [],
+            "last_scan": None
+        }
+    )
+
+
+def save_market_state(state):
+    save_json_file(RADAR_MARKET_FILE, state)
+
+
+def normalize_bank_name(bank):
+    bank = str(bank or "").strip().lower()
+
+    aliases = {
+        "banco inter": "inter",
+        "inter": "inter",
+        "banco pan": "pan",
+        "pan": "pan",
+        "mercado pago": "mercadopago",
+        "mercadopago": "mercadopago",
+        "mercado": "mercado",
+    }
+
+    return aliases.get(bank, bank)
+
+
+def normalize_type_identity(inv_type):
+    text = str(inv_type or "").strip().lower()
+
+    if "lci" in text:
+        return "LCI"
+    if "lca" in text:
+        return "LCA"
+    if "cdb" in text:
+        return "CDB"
+
+    # Quando a fonte traz faixas como "Até 180 dias", "De 181 a 360 dias"
+    if "dias" in text or "anos" in text or "meses" in text:
+        return "CDB"
+
+    return str(inv_type or "").strip().upper() or "INVESTIMENTO"
+
+
+def normalize_liquidity_flag(value):
+    return bool(value)
+
+
+def build_product_key(r):
+    """
+    ID estável da oportunidade para:
+    - reduzir falsas "novas oportunidades"
+    - permitir detectar mudança de taxa no mesmo produto
+
+    Aqui ignoramos a taxa no ID, para que a mesma oportunidade com taxa alterada
+    seja tratada como mudança de taxa, e não como produto totalmente novo.
+    """
+    bank = normalize_bank_name(r.get("bank"))
+    inv_type = normalize_type_identity(r.get("type"))
+    liquidity = normalize_liquidity_flag(r.get("liquidity"))
+
+    return "|".join([
+        bank,
+        inv_type,
+        str(liquidity),
+    ])
+
+
+def build_alert_id(r):
+    return "|".join([
+        str(r.get("bank", "")).strip().lower(),
+        str(r.get("type", "")).strip().upper(),
+        str(round(float(r.get("rate", 0)), 2)),
+        str(int(r.get("days", 365))),
+        str(bool(r.get("liquidity", False))),
+    ])
+
+
+def snapshot_from_item(r):
+    return {
+        "bank": r.get("bank"),
+        "type": r.get("type"),
+        "rate": r.get("rate"),
+        "days": r.get("days"),
+        "liquidity": r.get("liquidity"),
+        "gross": r.get("gross"),
+        "net": r.get("net"),
+        "score": r.get("score"),
+        "classification": r.get("classification"),
+        "rare": r.get("rare"),
+        "beats_selic": r.get("beats_selic"),
+    }
+
+
+def append_market_event(state, event, max_events=200):
+    events = state.get("events", [])
+    events.append(event)
+    if len(events) > max_events:
+        events = events[-max_events:]
+    state["events"] = events
+
+
+def scan_market_changes(ranked):
+    """
+    Compara a rodada atual com o estado salvo e detecta:
+    - novas oportunidades
+    - mudanças de taxa
+
+    Também atualiza o arquivo de estado do radar.
+    """
+    state = load_market_state()
+    old_products = state.get("products", {})
+    new_products = {}
+
+    new_items = []
+    changed_items = []
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    for r in ranked:
+        product_key = build_product_key(r)
+        current_snapshot = snapshot_from_item(r)
+        current_snapshot["last_seen"] = now_str
+
+        previous = old_products.get(product_key)
+
+        if previous is None:
+            new_items.append(r)
+            append_market_event(
+                state,
+                {
+                    "kind": "new",
+                    "timestamp": now_str,
+                    "product_key": product_key,
+                    "item": current_snapshot,
+                }
+            )
+        else:
+            old_rate = previous.get("rate")
+            new_rate = current_snapshot.get("rate")
+
+            if old_rate != new_rate:
+                changed_items.append({
+                    "old": previous,
+                    "new": current_snapshot,
+                    "product_key": product_key
+                })
+
+                append_market_event(
+                    state,
+                    {
+                        "kind": "rate_change",
+                        "timestamp": now_str,
+                        "product_key": product_key,
+                        "old_rate": old_rate,
+                        "new_rate": new_rate,
+                        "item": current_snapshot,
+                    }
+                )
+
+        new_products[product_key] = current_snapshot
+
+    state["products"] = new_products
+    state["last_scan"] = now_str
+    save_market_state(state)
+
+    return new_items, changed_items
+
+
+# =========================================================
+# RADAR DATA
+# =========================================================
 
 def build_ranked_data():
     data = collect_all()
@@ -125,46 +299,29 @@ def format_item(i, r):
     return msg
 
 
-def build_alert_id(r):
-    return "|".join([
-        str(r.get("bank", "")).strip().lower(),
-        str(r.get("type", "")).strip().upper(),
-        str(round(float(r.get("rate", 0)), 2)),
-        str(int(r.get("days", 365))),
-        str(bool(r.get("liquidity", False))),
-    ])
+def format_change_item(i, change):
+    old_item = change["old"]
+    new_item = change["new"]
+
+    old_rate = old_item.get("rate")
+    new_rate = new_item.get("rate")
+
+    direction = "📈 TAXA MELHOROU" if new_rate > old_rate else "📉 TAXA MUDOU"
+
+    return (
+        f"{i}️⃣ {direction}\n"
+        f"💼 {new_item.get('type')} \n"
+        f"🏦 Instituição: {new_item.get('bank')}\n"
+        f"📅 Prazo: {new_item.get('days')} dias\n"
+        f"💧 Liquidez diária: {'Sim' if new_item.get('liquidity') else 'Não'}\n"
+        f"🔁 Antes: {old_rate}% CDI\n"
+        f"✨ Agora: {new_rate}% CDI\n\n"
+    )
 
 
-def build_opportunity_id(r):
-    return "|".join([
-        str(r.get("bank", "")).strip().lower(),
-        str(r.get("type", "")).strip().upper(),
-        str(round(float(r.get("rate", 0)), 2)),
-        str(int(r.get("days", 365))),
-        str(bool(r.get("liquidity", False))),
-    ])
-
-
-def get_new_opportunities(ranked):
-    seen_data = load_radar_seen()
-    seen_ids = set(seen_data.get("seen_ids", []))
-
-    new_items = []
-    current_ids = []
-
-    for r in ranked:
-        oid = build_opportunity_id(r)
-        current_ids.append(oid)
-
-        if oid not in seen_ids:
-            new_items.append(r)
-
-    seen_data["seen_ids"] = current_ids
-    seen_data["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    save_radar_seen(seen_data)
-
-    return new_items
-
+# =========================================================
+# ALERT LOGIC
+# =========================================================
 
 def is_alert_candidate(r):
     return bool(r.get("beats_selic")) or bool(r.get("rare"))
@@ -189,7 +346,167 @@ def build_alert_message(r):
     )
 
 
+async def process_automatic_alerts(application):
+    runtime_data = load_alert_runtime()
+
+    try:
+        chat_id = runtime_data.get("alert_chat_id")
+        if not chat_id:
+            runtime_data["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            runtime_data["last_error"] = "nenhum chat de alerta registrado"
+            runtime_data["last_sent_count"] = 0
+            save_alert_runtime(runtime_data)
+            return
+
+        ranked = build_ranked_data()
+        candidates = [r for r in ranked if is_alert_candidate(r)]
+
+        cache = load_alert_cache()
+        sent_ids = set(cache.get("sent_ids", []))
+
+        new_candidates = []
+        for r in candidates:
+            aid = build_alert_id(r)
+            if aid not in sent_ids:
+                new_candidates.append(r)
+
+        new_candidates = new_candidates[:MAX_ALERTS_PER_CYCLE]
+
+        sent_count = 0
+        last_alert_preview = ""
+
+        for r in new_candidates:
+            msg = build_alert_message(r)
+            await application.bot.send_message(chat_id=chat_id, text=msg)
+
+            sent_ids.add(build_alert_id(r))
+            sent_count += 1
+            last_alert_preview = f"{r['type']} {r['rate']}% CDI | {r['bank']}"
+
+        cache["sent_ids"] = list(sent_ids)
+        cache = cleanup_alert_cache(cache)
+        save_alert_cache(cache)
+
+        runtime_data["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        runtime_data["last_total_ranked"] = len(ranked)
+        runtime_data["last_candidates"] = len(candidates)
+        runtime_data["last_sent_count"] = sent_count
+        runtime_data["last_error"] = ""
+        runtime_data["last_alert_preview"] = last_alert_preview
+        save_alert_runtime(runtime_data)
+
+    except Exception as e:
+        runtime_data["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        runtime_data["last_error"] = str(e)
+        runtime_data["last_sent_count"] = 0
+        save_alert_runtime(runtime_data)
+
+
+async def alert_job(context):
+    await process_automatic_alerts(context.application)
+
+
+async def post_init(application):
+    if application.job_queue is None:
+        print("⚠️ JobQueue não disponível. Alertas automáticos não serão agendados.")
+        return
+
+    application.job_queue.run_repeating(
+        alert_job,
+        interval=ALERT_INTERVAL_SECONDS,
+        first=15,
+        name="automatic_alert_job"
+    )
+    print(f"🟢 Job de alertas agendado a cada {ALERT_INTERVAL_SECONDS} segundos")
+
+
+# =========================================================
+# UI TEXT BUILDERS
+# =========================================================
+
+def register_current_chat(update):
+    if update and update.effective_chat:
+        set_registered_alert_chat_id(update.effective_chat.id)
+
+
+def build_main_menu_text():
+    return (
+        f"💰 {BOT_NAME}\n\n"
+        "📚 Comandos principais\n"
+        "/menu - ver menu completo\n"
+        "/help - ajuda rápida do radar\n"
+        "/about - sobre o radar\n"
+        "/fontes - fontes monitoradas\n"
+        "/stats - estatísticas do radar\n"
+        "/novas - novas oportunidades\n"
+        "/mudancas - mudanças de taxa\n"
+        "/historico - histórico do radar\n"
+        "/ranking - ver ranking\n"
+        "/top10 - top 10\n"
+        "/status - ver status\n"
+        "/benchmark - ver benchmark\n\n"
+        "📊 Filtros de oportunidades\n"
+        "/diarios - CDB liquidez diária\n"
+        "/curtos - CDB curto prazo\n"
+        "/isentos - LCI/LCA\n"
+        "/selicplus - melhores que Selic\n\n"
+        "🚨 Alertas e sistema\n"
+        "/alertastatus - status dos alertas\n"
+        "/testealerta - enviar alerta de teste\n"
+        "/setalertchat - registrar este chat para alertas automáticos"
+    )
+
+
+def build_help_text():
+    return (
+        f"📚 Ajuda do {BOT_NAME}\n\n"
+        "Este bot monitora oportunidades de renda fixa e organiza os resultados automaticamente.\n\n"
+        "📈 Análise geral\n"
+        "/ranking - ranking principal das oportunidades\n"
+        "/top10 - top 10 investimentos do radar\n"
+        "/status - situação atual do radar e das fontes\n"
+        "/fontes - mostra as fontes monitoradas\n"
+        "/stats - mostra as estatísticas do radar\n"
+        "/novas - mostra oportunidades novas detectadas\n"
+        "/mudancas - mostra mudanças de taxa detectadas\n"
+        "/historico - mostra os últimos eventos do radar\n"
+        "/benchmark - Selic e CDI atuais usados na comparação\n\n"
+        "🔎 Filtros específicos\n"
+        "/diarios - oportunidades com liquidez diária\n"
+        "/curtos - investimentos de curto prazo\n"
+        "/isentos - LCIs e LCAs\n"
+        "/selicplus - investimentos que superam a Selic\n\n"
+        "🚨 Alertas automáticos\n"
+        "/setalertchat - define este chat para receber alertas\n"
+        "/alertastatus - mostra o estado dos alertas automáticos\n"
+        "/testealerta - envia um alerta de teste\n\n"
+        "💡 Dica\n"
+        "Use /menu quando quiser ver a lista completa de comandos."
+    )
+
+
+def build_about_text():
+    return (
+        f"ℹ️ Sobre o {BOT_NAME}\n\n"
+        "O Radar de Investimentos monitora oportunidades de renda fixa no Brasil.\n\n"
+        "O sistema analisa automaticamente CDBs, LCIs e LCAs de múltiplas fontes públicas "
+        "e organiza as melhores oportunidades em um ranking.\n\n"
+        "Principais recursos:\n"
+        "• ranking automático de oportunidades\n"
+        "• detecção de investimentos que superam a Selic\n"
+        "• filtros por liquidez diária e prazo\n"
+        "• identificação de oportunidades raras\n"
+        "• alertas automáticos\n"
+        "• detecção de novas oportunidades\n"
+        "• detecção de mudança de taxa\n"
+        "• histórico do radar\n\n"
+        "Use /menu para acessar todos os comandos do radar."
+    )
+
+
 def build_sources_text():
+    # força uma coleta antes de mostrar as fontes
+    build_ranked_data()
     source_status = get_source_status()
 
     source_labels = {
@@ -270,157 +587,12 @@ def build_stats_text():
     )
 
 
-async def process_automatic_alerts(application):
-    runtime_data = load_alert_runtime()
-
-    try:
-        chat_id = runtime_data.get("alert_chat_id")
-        if not chat_id:
-            runtime_data["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            runtime_data["last_error"] = "nenhum chat de alerta registrado"
-            runtime_data["last_sent_count"] = 0
-            save_alert_runtime(runtime_data)
-            return
-
-        ranked = build_ranked_data()
-        candidates = [r for r in ranked if is_alert_candidate(r)]
-
-        cache = load_alert_cache()
-        sent_ids = set(cache.get("sent_ids", []))
-
-        new_candidates = []
-        for r in candidates:
-            aid = build_alert_id(r)
-            if aid not in sent_ids:
-                new_candidates.append(r)
-
-        new_candidates = new_candidates[:MAX_ALERTS_PER_CYCLE]
-
-        sent_count = 0
-        last_alert_preview = ""
-
-        for r in new_candidates:
-            msg = build_alert_message(r)
-            await application.bot.send_message(chat_id=chat_id, text=msg)
-
-            sent_ids.add(build_alert_id(r))
-            sent_count += 1
-            last_alert_preview = f"{r['type']} {r['rate']}% CDI | {r['bank']}"
-
-        cache["sent_ids"] = list(sent_ids)
-        cache = cleanup_alert_cache(cache)
-        save_alert_cache(cache)
-
-        runtime_data["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        runtime_data["last_total_ranked"] = len(ranked)
-        runtime_data["last_candidates"] = len(candidates)
-        runtime_data["last_sent_count"] = sent_count
-        runtime_data["last_error"] = ""
-        runtime_data["last_alert_preview"] = last_alert_preview
-        save_alert_runtime(runtime_data)
-
-    except Exception as e:
-        runtime_data["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        runtime_data["last_error"] = str(e)
-        runtime_data["last_sent_count"] = 0
-        save_alert_runtime(runtime_data)
-
-
-async def alert_job(context):
-    await process_automatic_alerts(context.application)
-
-
-async def post_init(application):
-    if application.job_queue is None:
-        print("⚠️ JobQueue não disponível. Alertas automáticos não serão agendados.")
-        return
-
-    application.job_queue.run_repeating(
-        alert_job,
-        interval=ALERT_INTERVAL_SECONDS,
-        first=15,
-        name="automatic_alert_job"
-    )
-    print(f"🟢 Job de alertas agendado a cada {ALERT_INTERVAL_SECONDS} segundos")
-
-
-def register_current_chat(update):
-    if update and update.effective_chat:
-        set_registered_alert_chat_id(update.effective_chat.id)
-
-
-def build_main_menu_text():
-    return (
-        f"💰 {BOT_NAME}\n\n"
-        "📚 Comandos principais\n"
-        "/menu - ver menu completo\n"
-        "/help - ajuda rápida do radar\n"
-        "/about - sobre o radar\n"
-        "/fontes - fontes monitoradas\n"
-        "/stats - estatísticas do radar\n"
-        "/novas - novas oportunidades\n"
-        "/ranking - ver ranking\n"
-        "/top10 - top 10\n"
-        "/status - ver status\n"
-        "/benchmark - ver benchmark\n\n"
-        "📊 Filtros de oportunidades\n"
-        "/diarios - CDB liquidez diária\n"
-        "/curtos - CDB curto prazo\n"
-        "/isentos - LCI/LCA\n"
-        "/selicplus - melhores que Selic\n\n"
-        "🚨 Alertas e sistema\n"
-        "/alertastatus - status dos alertas\n"
-        "/testealerta - enviar alerta de teste\n"
-        "/setalertchat - registrar este chat para alertas automáticos"
-    )
-
-
-def build_help_text():
-    return (
-        f"📚 Ajuda do {BOT_NAME}\n\n"
-        "Este bot monitora oportunidades de renda fixa e organiza os resultados automaticamente.\n\n"
-        "📈 Análise geral\n"
-        "/ranking - ranking principal das oportunidades\n"
-        "/top10 - top 10 investimentos do radar\n"
-        "/status - situação atual do radar e das fontes\n"
-        "/fontes - mostra as fontes monitoradas\n"
-        "/stats - mostra as estatísticas do radar\n"
-        "/novas - mostra oportunidades novas detectadas\n"
-        "/benchmark - Selic e CDI atuais usados na comparação\n\n"
-        "🔎 Filtros específicos\n"
-        "/diarios - oportunidades com liquidez diária\n"
-        "/curtos - investimentos de curto prazo\n"
-        "/isentos - LCIs e LCAs\n"
-        "/selicplus - investimentos que superam a Selic\n\n"
-        "🚨 Alertas automáticos\n"
-        "/setalertchat - define este chat para receber alertas\n"
-        "/alertastatus - mostra o estado dos alertas automáticos\n"
-        "/testealerta - envia um alerta de teste\n\n"
-        "💡 Dica\n"
-        "Use /menu quando quiser ver a lista completa de comandos."
-    )
-
-
-def build_about_text():
-    return (
-        f"ℹ️ Sobre o {BOT_NAME}\n\n"
-        "O Radar de Investimentos monitora oportunidades de renda fixa no Brasil.\n\n"
-        "O sistema analisa automaticamente CDBs, LCIs e LCAs de múltiplas fontes públicas "
-        "e organiza as melhores oportunidades em um ranking.\n\n"
-        "Principais recursos:\n"
-        "• ranking automático de oportunidades\n"
-        "• detecção de investimentos que superam a Selic\n"
-        "• filtros por liquidez diária e prazo\n"
-        "• identificação de oportunidades raras\n"
-        "• alertas automáticos\n"
-        "• detecção de novas oportunidades\n\n"
-        "Use /menu para acessar todos os comandos do radar."
-    )
-
+# =========================================================
+# COMMANDS
+# =========================================================
 
 async def start_cmd(update, context):
     register_current_chat(update)
-
     await update.message.reply_text(
         build_main_menu_text(),
         reply_markup=ReplyKeyboardRemove()
@@ -429,7 +601,6 @@ async def start_cmd(update, context):
 
 async def menu_cmd(update, context):
     register_current_chat(update)
-
     await update.message.reply_text(
         build_main_menu_text(),
         reply_markup=ReplyKeyboardRemove()
@@ -438,7 +609,6 @@ async def menu_cmd(update, context):
 
 async def help_cmd(update, context):
     register_current_chat(update)
-
     await update.message.reply_text(
         build_help_text(),
         reply_markup=ReplyKeyboardRemove()
@@ -447,7 +617,6 @@ async def help_cmd(update, context):
 
 async def about_cmd(update, context):
     register_current_chat(update)
-
     await update.message.reply_text(
         build_about_text(),
         reply_markup=ReplyKeyboardRemove()
@@ -456,7 +625,6 @@ async def about_cmd(update, context):
 
 async def fontes_cmd(update, context):
     register_current_chat(update)
-
     await update.message.reply_text(
         build_sources_text(),
         reply_markup=ReplyKeyboardRemove()
@@ -465,7 +633,6 @@ async def fontes_cmd(update, context):
 
 async def stats_cmd(update, context):
     register_current_chat(update)
-
     await update.message.reply_text(
         build_stats_text(),
         reply_markup=ReplyKeyboardRemove()
@@ -476,7 +643,7 @@ async def novas_cmd(update, context):
     register_current_chat(update)
 
     ranked = build_ranked_data()
-    new_items = get_new_opportunities(ranked)
+    new_items, _changed_items = scan_market_changes(ranked)
 
     if not new_items:
         await update.message.reply_text(
@@ -486,9 +653,77 @@ async def novas_cmd(update, context):
         return
 
     msg = "🆕 Novas oportunidades detectadas\n\n"
-
     for i, r in enumerate(new_items[:10], 1):
         msg += format_item(i, r)
+
+    await update.message.reply_text(
+        msg,
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+
+async def mudancas_cmd(update, context):
+    register_current_chat(update)
+
+    ranked = build_ranked_data()
+    _new_items, changed_items = scan_market_changes(ranked)
+
+    if not changed_items:
+        await update.message.reply_text(
+            "📉 Nenhuma mudança de taxa detectada no momento.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
+
+    msg = "📈 Mudanças de taxa detectadas\n\n"
+    for i, change in enumerate(changed_items[:10], 1):
+        msg += format_change_item(i, change)
+
+    await update.message.reply_text(
+        msg,
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+
+async def historico_cmd(update, context):
+    register_current_chat(update)
+
+    state = load_market_state()
+    events = state.get("events", [])
+
+    if not events:
+        await update.message.reply_text(
+            "🕘 Histórico vazio no momento.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
+
+    last_events = events[-10:]
+    last_events.reverse()
+
+    msg = "🕘 Histórico do Radar\n\n"
+
+    for i, event in enumerate(last_events, 1):
+        kind = event.get("kind")
+        timestamp = event.get("timestamp", "N/A")
+        item = event.get("item", {})
+
+        if kind == "new":
+            msg += (
+                f"{i}️⃣ 🆕 Nova oportunidade\n"
+                f"🕒 {timestamp}\n"
+                f"💼 {item.get('type')} {item.get('rate')}% CDI\n"
+                f"🏦 {item.get('bank')}\n\n"
+            )
+        elif kind == "rate_change":
+            msg += (
+                f"{i}️⃣ 📈 Mudança de taxa\n"
+                f"🕒 {timestamp}\n"
+                f"💼 {item.get('type')} \n"
+                f"🏦 {item.get('bank')}\n"
+                f"🔁 Antes: {event.get('old_rate')}% CDI\n"
+                f"✨ Agora: {event.get('new_rate')}% CDI\n\n"
+            )
 
     await update.message.reply_text(
         msg,
@@ -590,8 +825,8 @@ async def ranking_cmd(update, context):
     register_current_chat(update)
 
     ranked = build_ranked_data()
-
     msg = "🏆 Ranking de oportunidades\n\n"
+
     for i, r in enumerate(ranked[:10], 1):
         msg += format_item(i, r)
 
@@ -602,8 +837,8 @@ async def top10_cmd(update, context):
     register_current_chat(update)
 
     ranked = build_ranked_data()
-
     msg = "🔝 Top 10 oportunidades\n\n"
+
     for i, r in enumerate(ranked[:10], 1):
         msg += format_item(i, r)
 
@@ -745,6 +980,10 @@ async def testealerta_cmd(update, context):
     await update.message.reply_text(msg)
 
 
+# =========================================================
+# MAIN
+# =========================================================
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         raise ValueError("Defina TELEGRAM_BOT_TOKEN nas variáveis do Railway.")
@@ -763,6 +1002,8 @@ def main():
     app.add_handler(CommandHandler("fontes", fontes_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("novas", novas_cmd))
+    app.add_handler(CommandHandler("mudancas", mudancas_cmd))
+    app.add_handler(CommandHandler("historico", historico_cmd))
     app.add_handler(CommandHandler("benchmark", benchmark_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ranking", ranking_cmd))
