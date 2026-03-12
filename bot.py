@@ -11,6 +11,7 @@ from ranking import rank
 
 ALERTS_SENT_FILE = "alerts_sent.json"
 ALERT_RUNTIME_FILE = "alert_runtime.json"
+RADAR_SEEN_FILE = "radar_seen.json"
 
 ALERT_INTERVAL_SECONDS = getattr(config, "ALERT_INTERVAL_SECONDS", 1800)
 MAX_ALERTS_PER_CYCLE = getattr(config, "MAX_ALERTS_PER_CYCLE", 3)
@@ -80,6 +81,20 @@ def save_alert_runtime(runtime_data):
     save_json_file(ALERT_RUNTIME_FILE, runtime_data)
 
 
+def load_radar_seen():
+    return load_json_file(
+        RADAR_SEEN_FILE,
+        {
+            "seen_ids": [],
+            "last_update": None
+        }
+    )
+
+
+def save_radar_seen(data):
+    save_json_file(RADAR_SEEN_FILE, data)
+
+
 def set_registered_alert_chat_id(chat_id):
     runtime_data = load_alert_runtime()
     runtime_data["alert_chat_id"] = str(chat_id)
@@ -118,6 +133,37 @@ def build_alert_id(r):
         str(int(r.get("days", 365))),
         str(bool(r.get("liquidity", False))),
     ])
+
+
+def build_opportunity_id(r):
+    return "|".join([
+        str(r.get("bank", "")).strip().lower(),
+        str(r.get("type", "")).strip().upper(),
+        str(round(float(r.get("rate", 0)), 2)),
+        str(int(r.get("days", 365))),
+        str(bool(r.get("liquidity", False))),
+    ])
+
+
+def get_new_opportunities(ranked):
+    seen_data = load_radar_seen()
+    seen_ids = set(seen_data.get("seen_ids", []))
+
+    new_items = []
+    current_ids = []
+
+    for r in ranked:
+        oid = build_opportunity_id(r)
+        current_ids.append(oid)
+
+        if oid not in seen_ids:
+            new_items.append(r)
+
+    seen_data["seen_ids"] = current_ids
+    seen_data["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    save_radar_seen(seen_data)
+
+    return new_items
 
 
 def is_alert_candidate(r):
@@ -312,6 +358,7 @@ def build_main_menu_text():
         "/about - sobre o radar\n"
         "/fontes - fontes monitoradas\n"
         "/stats - estatísticas do radar\n"
+        "/novas - novas oportunidades\n"
         "/ranking - ver ranking\n"
         "/top10 - top 10\n"
         "/status - ver status\n"
@@ -338,6 +385,7 @@ def build_help_text():
         "/status - situação atual do radar e das fontes\n"
         "/fontes - mostra as fontes monitoradas\n"
         "/stats - mostra as estatísticas do radar\n"
+        "/novas - mostra oportunidades novas detectadas\n"
         "/benchmark - Selic e CDI atuais usados na comparação\n\n"
         "🔎 Filtros específicos\n"
         "/diarios - oportunidades com liquidez diária\n"
@@ -364,7 +412,8 @@ def build_about_text():
         "• detecção de investimentos que superam a Selic\n"
         "• filtros por liquidez diária e prazo\n"
         "• identificação de oportunidades raras\n"
-        "• alertas automáticos\n\n"
+        "• alertas automáticos\n"
+        "• detecção de novas oportunidades\n\n"
         "Use /menu para acessar todos os comandos do radar."
     )
 
@@ -419,6 +468,30 @@ async def stats_cmd(update, context):
 
     await update.message.reply_text(
         build_stats_text(),
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+
+async def novas_cmd(update, context):
+    register_current_chat(update)
+
+    ranked = build_ranked_data()
+    new_items = get_new_opportunities(ranked)
+
+    if not new_items:
+        await update.message.reply_text(
+            "🆕 Nenhuma nova oportunidade detectada no momento.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
+
+    msg = "🆕 Novas oportunidades detectadas\n\n"
+
+    for i, r in enumerate(new_items[:10], 1):
+        msg += format_item(i, r)
+
+    await update.message.reply_text(
+        msg,
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -689,6 +762,7 @@ def main():
     app.add_handler(CommandHandler("about", about_cmd))
     app.add_handler(CommandHandler("fontes", fontes_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_handler(CommandHandler("novas", novas_cmd))
     app.add_handler(CommandHandler("benchmark", benchmark_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ranking", ranking_cmd))
