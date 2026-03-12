@@ -229,6 +229,7 @@ def build_main_menu_text():
         "/menu - ver menu completo\n"
         "/help - ajuda rápida do radar\n"
         "/about - sobre o radar\n"
+        "/fontes - fontes monitoradas\n"
         "/ranking - ver ranking\n"
         "/top10 - top 10\n"
         "/status - ver status\n"
@@ -253,6 +254,7 @@ def build_help_text():
         "/ranking - ranking principal das oportunidades\n"
         "/top10 - top 10 investimentos do radar\n"
         "/status - situação atual do radar e das fontes\n"
+        "/fontes - mostra as fontes monitoradas\n"
         "/benchmark - Selic e CDI atuais usados na comparação\n\n"
         "🔎 Filtros específicos\n"
         "/diarios - oportunidades com liquidez diária\n"
@@ -282,6 +284,57 @@ def build_about_text():
         "• alertas automáticos\n\n"
         "Use /menu para acessar todos os comandos do radar."
     )
+
+
+def build_sources_text():
+    source_status = get_source_status()
+
+    source_labels = {
+        "yubb": "🔎 Yubb",
+        "public_pages": "🌍 Páginas públicas",
+        "investidor10": "📈 Investidor10",
+        "maisretorno": "📊 MaisRetorno",
+        "statusinvest": "📉 StatusInvest",
+        "fallback": "🧪 Fallback",
+    }
+
+    active_sources = []
+    inactive_sources = []
+    fallback_line = None
+
+    for source_name, info in source_status.items():
+        label = source_labels.get(source_name, f"📌 {source_name}")
+        count = info.get("count", 0)
+        error = str(info.get("error", "")).strip()
+
+        if source_name == "fallback":
+            fallback_line = f"{label}: {count}"
+            continue
+
+        if count > 0:
+            active_sources.append(f"{label}: {count}")
+        else:
+            if error:
+                inactive_sources.append(f"{label} — {error[:120]}")
+            else:
+                inactive_sources.append(f"{label} — sem retorno no momento")
+
+    msg = "📡 Fontes monitoradas pelo radar\n\n"
+
+    if active_sources:
+        msg += "✅ Fontes ativas\n"
+        msg += "\n".join(active_sources)
+        msg += "\n\n"
+
+    if inactive_sources:
+        msg += "⚠️ Fontes sem retorno no momento\n"
+        msg += "\n".join(inactive_sources)
+        msg += "\n\n"
+
+    if fallback_line:
+        msg += fallback_line
+
+    return msg.strip()
 
 
 async def start_cmd(update, context):
@@ -316,6 +369,14 @@ async def about_cmd(update, context):
 
     await update.message.reply_text(
         build_about_text(),
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+
+async def fontes_cmd(update, context):
+    register_current_chat(update)
+    await update.message.reply_text(
+        build_sources_text(),
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -584,6 +645,7 @@ def main():
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("about", about_cmd))
+    app.add_handler(CommandHandler("fontes", fontes_cmd))
     app.add_handler(CommandHandler("benchmark", benchmark_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("ranking", ranking_cmd))
