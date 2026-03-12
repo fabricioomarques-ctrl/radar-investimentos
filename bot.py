@@ -438,7 +438,7 @@ async def diarios_cmd(update, context):
     register_current_chat(update)
 
     ranked = build_ranked_data()
-    diarios = [r for r in ranked if r.get("type") == "CDB" and i.get("liquidity")]
+    diarios = [r for r in ranked if r.get("type") == "CDB" and r.get("liquidity")]
 
     if not diarios:
         await update.message.reply_text(
