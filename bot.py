@@ -280,23 +280,51 @@ def build_ranked_data():
 
 
 def format_item(i, r):
-    sim_label = "🧪 Dado de exemplo\n" if r.get("bank") == "Simulação Interna" else ""
-    rare_label = "🔥 OPORTUNIDADE RARA REAL\n" if r.get("rare") else ""
-    best_label = "🏆 MELHOR TAXA DO MERCADO\n" if r.get("best_rate") else ""
-    selic_label = "✅ Melhor que Selic" if r.get("beats_selic") else "➖ Não supera a Selic"
+
+    rare_label = ""
+    anomaly_label = ""
+    best_label = ""
+
+    if r.get("best_rate"):
+        best_label = "🏆 MELHOR TAXA DO MERCADO\n"
+
+    if r.get("rare"):
+        rare_label = "🔥 OPORTUNIDADE RARA\n"
+
+    if r.get("anomaly"):
+        anomaly_label = "🚨 TAXA FORA DA CURVA\n"
+
+    selic_label = (
+        "✅ Melhor que Selic"
+        if r.get("beats_selic")
+        else "➖ Não supera a Selic"
+    )
 
     msg = ""
-    msg += f"{sim_label}{rare_label}{best_label}{i}️⃣ {r['type']} {r['rate']}% CDI\n"
-    msg += f"🏦 Instituição: {r['bank']}\n"
-    msg += f"📅 Prazo: {r['days']} dias\n"
-    msg += f"💧 Liquidez diária: {'Sim' if r['liquidity'] else 'Não'}\n"
-    msg += f"🧾 Retorno bruto estimado: {r['gross']:.2f}% a.a.\n"
-    msg += f"💰 Retorno líquido estimado: {r['net']:.2f}% a.a.\n"
-    msg += f"📊 Score: {r['score']}\n"
-    msg += f"{r['classification']}\n"
-    msg += f"{selic_label}\n\n"
-    return msg
 
+    msg += best_label
+    msg += rare_label
+    msg += anomaly_label
+
+    msg += f"{i}️⃣ {r['type']} {r['rate']}% CDI\n"
+
+    msg += f"🏦 Instituição: {r['bank']}\n"
+
+    msg += f"📅 Prazo: {r['days']} dias\n"
+
+    msg += f"💧 Liquidez diária: {'Sim' if r['liquidity'] else 'Não'}\n"
+
+    msg += f"🧾 Retorno bruto estimado: {r['gross']:.2f}% a.a.\n"
+
+    msg += f"💰 Retorno líquido estimado: {r['net']:.2f}% a.a.\n"
+
+    msg += f"📊 Score: {r['score']}\n"
+
+    msg += f"{r['classification']}\n"
+
+    msg += f"{selic_label}\n\n"
+
+    return msg
 
 def format_change_item(i, change):
     old_item = change["old"]
