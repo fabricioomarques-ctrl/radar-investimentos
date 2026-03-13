@@ -3,7 +3,7 @@ from config import CDI, SELIC
 
 
 PROMO_CDB_RATE = 120.0
-PROMO_ISENTO_RATE = 95.0
+PROMO_ISENTO_RATE = 97.0
 
 ANOMALY_GAP_CDB = 8.0
 ANOMALY_GAP_ISENTO = 5.0
@@ -119,7 +119,9 @@ def score(item, net):
     s = 0
 
     if inv_type in ["LCI", "LCA"]:
-        if rate >= 97:
+        if rate >= 100:
+            s += 7
+        elif rate >= 97:
             s += 6
         elif rate >= 95:
             s += 5
