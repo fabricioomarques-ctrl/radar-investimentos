@@ -26,9 +26,9 @@ def normalize_type(value):
 
 
 def classify(score):
-    if score >= 11:
+    if score >= 13:
         return "🔴 OPORTUNIDADE IMPERDÍVEL"
-    elif score >= 8:
+    elif score >= 9:
         return "🟡 OPORTUNIDADE FORTE"
     elif score >= 5:
         return "🟢 BOA OPORTUNIDADE"
@@ -115,6 +115,9 @@ def score(item, net):
     best_rate = bool(item.get("best_rate", False))
     promo = bool(item.get("promo", False))
     anomaly = bool(item.get("anomaly", False))
+    above_bank_history = bool(item.get("above_bank_history", False))
+    above_type_history = bool(item.get("above_type_history", False))
+    best_recent_level = bool(item.get("best_recent_level", False))
 
     s = 0
 
@@ -171,6 +174,15 @@ def score(item, net):
     if anomaly:
         s += 2.5
 
+    if above_bank_history:
+        s += 1.5
+
+    if above_type_history:
+        s += 1.5
+
+    if best_recent_level:
+        s += 1.0
+
     return round(s, 1)
 
 
@@ -208,6 +220,9 @@ def rank(data):
         key=lambda x: (
             x.get("promo", False),
             x.get("anomaly", False),
+            x.get("above_bank_history", False),
+            x.get("above_type_history", False),
+            x.get("best_recent_level", False),
             x.get("best_rate", False),
             x.get("beats_selic", False),
             x.get("score", 0),
