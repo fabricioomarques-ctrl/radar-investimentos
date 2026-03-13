@@ -10,6 +10,7 @@ from telegram.ext import Application, CommandHandler
 import config
 from engine import collect_all, get_source_status
 from ranking import rank
+from utils.historical_context import update_historical_context, enrich_with_historical_context
 
 
 ALERTS_SENT_FILE = "alerts_sent.json"
@@ -186,6 +187,12 @@ def snapshot_from_item(r):
         "anomaly": r.get("anomaly"),
         "best_rate": r.get("best_rate"),
         "beats_selic": r.get("beats_selic"),
+        "above_bank_history": r.get("above_bank_history"),
+        "above_type_history": r.get("above_type_history"),
+        "best_recent_level": r.get("best_recent_level"),
+        "bank_avg_history": r.get("bank_avg_history"),
+        "type_avg_history": r.get("type_avg_history"),
+        "recent_best_history": r.get("recent_best_history"),
     }
 
 
@@ -200,13 +207,6 @@ def append_market_event(state, event, max_events=200):
 
 
 def is_flash_promo(item):
-    """
-    Promoção relâmpago só deve ocorrer quando houver algo realmente especial:
-    - promoção de mercado
-    - taxa fora da curva
-
-    Melhor taxa da categoria, sozinha, não basta.
-    """
     return bool(item.get("promo")) or bool(item.get("anomaly"))
 
 
@@ -285,7 +285,9 @@ def scan_market_changes(ranked):
 
 def build_ranked_data():
     data = collect_all()
+    data = enrich_with_historical_context(data)
     ranked = rank(data)
+    update_historical_context(ranked)
     return ranked
 
 
@@ -294,6 +296,9 @@ def format_item(i, r):
     promo_label = "🚨 PROMOÇÃO DE MERCADO\n" if r.get("promo") else ""
     anomaly_label = "📈 TAXA FORA DA CURVA\n" if r.get("anomaly") else ""
     best_label = "🏆 MELHOR TAXA DO MERCADO\n" if r.get("best_rate") else ""
+    bank_history_label = "🏦 ACIMA DO PADRÃO DO BANCO\n" if r.get("above_bank_history") else ""
+    type_history_label = "📚 ACIMA DA MÉDIA HISTÓRICA\n" if r.get("above_type_history") else ""
+    recent_best_label = "🕒 MELHOR NÍVEL RECENTE\n" if r.get("best_recent_level") else ""
     selic_label = "✅ Melhor que Selic" if r.get("beats_selic") else "➖ Não supera a Selic"
 
     msg = ""
@@ -301,6 +306,9 @@ def format_item(i, r):
     msg += promo_label
     msg += anomaly_label
     msg += best_label
+    msg += bank_history_label
+    msg += type_history_label
+    msg += recent_best_label
     msg += f"{i}️⃣ {r['type']} {r['rate']}% CDI\n"
     msg += f"🏦 Instituição: {r['bank']}\n"
     msg += f"📅 Prazo: {r['days']} dias\n"
@@ -309,6 +317,16 @@ def format_item(i, r):
     msg += f"💰 Retorno líquido estimado: {r['net']:.2f}% a.a.\n"
     msg += f"📊 Score: {r['score']}\n"
     msg += f"📉 Média da categoria: {r.get('market_avg', 0)}% CDI\n"
+
+    if r.get("bank_avg_history", 0) > 0:
+        msg += f"🏦 Média histórica do banco: {r.get('bank_avg_history', 0)}% CDI\n"
+
+    if r.get("type_avg_history", 0) > 0:
+        msg += f"📚 Média histórica da categoria: {r.get('type_avg_history', 0)}% CDI\n"
+
+    if r.get("recent_best_history", 0) > 0:
+        msg += f"🕒 Melhor nível recente da categoria: {r.get('recent_best_history', 0)}% CDI\n"
+
     msg += f"{r['classification']}\n"
     msg += f"{selic_label}\n\n"
     return msg
@@ -391,7 +409,7 @@ def build_flash_promos_text():
 
 
 def is_alert_candidate(r):
-    return bool(r.get("promo")) or bool(r.get("anomaly"))
+    return bool(r.get("promo")) or bool(r.get("anomaly")) or bool(r.get("above_bank_history")) or bool(r.get("best_recent_level"))
 
 
 def build_alert_message(r):
@@ -399,6 +417,9 @@ def build_alert_message(r):
     promo_label = "🚨 PROMOÇÃO DE MERCADO\n" if r.get("promo") else ""
     anomaly_label = "📈 TAXA FORA DA CURVA\n" if r.get("anomaly") else ""
     best_label = "🏆 MELHOR TAXA DO MERCADO\n" if r.get("best_rate") else ""
+    bank_history_label = "🏦 ACIMA DO PADRÃO DO BANCO\n" if r.get("above_bank_history") else ""
+    type_history_label = "📚 ACIMA DA MÉDIA HISTÓRICA\n" if r.get("above_type_history") else ""
+    recent_best_label = "🕒 MELHOR NÍVEL RECENTE\n" if r.get("best_recent_level") else ""
     selic_label = "✅ Melhor que Selic\n" if r.get("beats_selic") else ""
 
     return (
@@ -407,6 +428,9 @@ def build_alert_message(r):
         f"{promo_label}"
         f"{anomaly_label}"
         f"{best_label}"
+        f"{bank_history_label}"
+        f"{type_history_label}"
+        f"{recent_best_label}"
         f"💼 {r['type']} {r['rate']}% CDI\n"
         f"🏦 Instituição: {r['bank']}\n"
         f"📅 Prazo: {r['days']} dias\n"
@@ -578,6 +602,7 @@ def build_about_text():
         "• detector de promoções de mercado\n"
         "• detector de taxa fora da curva\n"
         "• detector de promoções relâmpago\n"
+        "• detector de contexto histórico por banco e categoria\n"
         "• alerta automático para oportunidades especiais\n"
         "• ranking automático de oportunidades\n"
         "• histórico do radar\n\n"
@@ -647,6 +672,8 @@ def build_stats_text():
     isentos = sum(1 for i in ranked if i.get("type_normalized") in ["LCI", "LCA"])
     promos = sum(1 for i in ranked if i.get("promo"))
     anomalies = sum(1 for i in ranked if i.get("anomaly"))
+    bank_history = sum(1 for i in ranked if i.get("above_bank_history"))
+    recent_best = sum(1 for i in ranked if i.get("best_recent_level"))
 
     fontes_ativas = sum(
         1 for source_name, info in source_status.items()
@@ -663,7 +690,9 @@ def build_stats_text():
         f"Curto prazo: {curtos}\n"
         f"LCI/LCA (isentos): {isentos}\n"
         f"Promoções detectadas: {promos}\n"
-        f"Taxas fora da curva: {anomalies}"
+        f"Taxas fora da curva: {anomalies}\n"
+        f"Acima do padrão do banco: {bank_history}\n"
+        f"Melhores níveis recentes: {recent_best}"
     )
 
 
@@ -1070,13 +1099,16 @@ async def testealerta_cmd(update, context):
         "liquidity": True,
         "gross": 13.63,
         "net": 11.59,
-        "score": 12,
+        "score": 15,
         "classification": "🔴 OPORTUNIDADE IMPERDÍVEL",
         "promo": True,
         "anomaly": True,
         "best_rate": True,
         "flash_promo": True,
         "market_avg": 109.0,
+        "above_bank_history": True,
+        "above_type_history": True,
+        "best_recent_level": True,
         "beats_selic": True,
     }
 
