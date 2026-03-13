@@ -200,7 +200,14 @@ def append_market_event(state, event, max_events=200):
 
 
 def is_flash_promo(item):
-    return bool(item.get("promo")) or bool(item.get("anomaly")) or bool(item.get("best_rate"))
+    """
+    Promoção relâmpago só deve ocorrer quando houver algo realmente especial:
+    - promoção de mercado
+    - taxa fora da curva
+
+    Melhor taxa da categoria, sozinha, não basta.
+    """
+    return bool(item.get("promo")) or bool(item.get("anomaly"))
 
 
 def scan_market_changes(ranked):
