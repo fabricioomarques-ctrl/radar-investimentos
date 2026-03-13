@@ -199,6 +199,10 @@ def append_market_event(state, event, max_events=200):
     state["events"] = events
 
 
+def is_flash_promo(item):
+    return bool(item.get("promo")) or bool(item.get("anomaly")) or bool(item.get("best_rate"))
+
+
 def scan_market_changes(ranked):
     state = load_market_state()
     old_products = state.get("products", {})
@@ -206,6 +210,7 @@ def scan_market_changes(ranked):
 
     new_items = []
     changed_items = []
+    flash_items = []
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     for r in ranked:
@@ -217,6 +222,19 @@ def scan_market_changes(ranked):
 
         if previous is None:
             new_items.append(r)
+
+            if is_flash_promo(r):
+                flash_items.append(r)
+                append_market_event(
+                    state,
+                    {
+                        "kind": "flash_promo",
+                        "timestamp": now_str,
+                        "product_key": product_key,
+                        "item": current_snapshot,
+                    }
+                )
+
             append_market_event(
                 state,
                 {
@@ -255,7 +273,7 @@ def scan_market_changes(ranked):
     state["last_scan"] = now_str
     save_market_state(state)
 
-    return new_items, changed_items
+    return new_items, changed_items, flash_items
 
 
 def build_ranked_data():
@@ -265,12 +283,14 @@ def build_ranked_data():
 
 
 def format_item(i, r):
+    flash_label = "⚡ PROMOÇÃO RELÂMPAGO\n" if r.get("flash_promo") else ""
     promo_label = "🚨 PROMOÇÃO DE MERCADO\n" if r.get("promo") else ""
     anomaly_label = "📈 TAXA FORA DA CURVA\n" if r.get("anomaly") else ""
     best_label = "🏆 MELHOR TAXA DO MERCADO\n" if r.get("best_rate") else ""
     selic_label = "✅ Melhor que Selic" if r.get("beats_selic") else "➖ Não supera a Selic"
 
     msg = ""
+    msg += flash_label
     msg += promo_label
     msg += anomaly_label
     msg += best_label
@@ -343,11 +363,32 @@ def build_anomalies_text():
     return msg.strip()
 
 
+def build_flash_promos_text():
+    ranked = build_ranked_data()
+    _new_items, _changed_items, flash_items = scan_market_changes(ranked)
+
+    if not flash_items:
+        return (
+            "⚡ Nenhuma promoção relâmpago detectada no momento.\n\n"
+            "Nenhuma oportunidade especial apareceu de forma repentina nesta rodada."
+        )
+
+    msg = "⚡ Promoções relâmpago detectadas\n\n"
+
+    for i, r in enumerate(flash_items[:10], 1):
+        item = dict(r)
+        item["flash_promo"] = True
+        msg += format_item(i, item)
+
+    return msg.strip()
+
+
 def is_alert_candidate(r):
     return bool(r.get("promo")) or bool(r.get("anomaly"))
 
 
 def build_alert_message(r):
+    flash_label = "⚡ PROMOÇÃO RELÂMPAGO\n" if r.get("flash_promo") else ""
     promo_label = "🚨 PROMOÇÃO DE MERCADO\n" if r.get("promo") else ""
     anomaly_label = "📈 TAXA FORA DA CURVA\n" if r.get("anomaly") else ""
     best_label = "🏆 MELHOR TAXA DO MERCADO\n" if r.get("best_rate") else ""
@@ -355,6 +396,7 @@ def build_alert_message(r):
 
     return (
         "🔔 ALERTA DO RADAR\n\n"
+        f"{flash_label}"
         f"{promo_label}"
         f"{anomaly_label}"
         f"{best_label}"
@@ -384,7 +426,17 @@ async def process_automatic_alerts(application):
             return
 
         ranked = build_ranked_data()
-        candidates = [r for r in ranked if is_alert_candidate(r)]
+        _new_items, _changed_items, flash_items = scan_market_changes(ranked)
+
+        flash_keys = {build_product_key(item) for item in flash_items}
+
+        candidates = []
+        for r in ranked:
+            if is_alert_candidate(r):
+                candidate = dict(r)
+                if build_product_key(candidate) in flash_keys:
+                    candidate["flash_promo"] = True
+                candidates.append(candidate)
 
         cache = load_alert_cache()
         sent_ids = set(cache.get("sent_ids", []))
@@ -461,6 +513,7 @@ def build_main_menu_text():
         "/stats - estatísticas do radar\n"
         "/promocoes - promoções de mercado\n"
         "/anomalias - taxas fora da curva\n"
+        "/relampago - promoções relâmpago\n"
         "/novas - novas oportunidades\n"
         "/mudancas - mudanças de taxa\n"
         "/historico - histórico do radar\n"
@@ -493,6 +546,7 @@ def build_help_text():
         "/stats - mostra as estatísticas do radar\n"
         "/promocoes - mostra promoções de mercado\n"
         "/anomalias - mostra taxas fora da curva\n"
+        "/relampago - mostra promoções relâmpago\n"
         "/novas - mostra oportunidades novas detectadas\n"
         "/mudancas - mostra mudanças de taxa detectadas\n"
         "/historico - mostra os últimos eventos do radar\n"
@@ -516,6 +570,7 @@ def build_about_text():
         "Principais recursos:\n"
         "• detector de promoções de mercado\n"
         "• detector de taxa fora da curva\n"
+        "• detector de promoções relâmpago\n"
         "• alerta automático para oportunidades especiais\n"
         "• ranking automático de oportunidades\n"
         "• histórico do radar\n\n"
@@ -645,11 +700,16 @@ async def anomalias_cmd(update, context):
     await update.message.reply_text(build_anomalies_text(), reply_markup=ReplyKeyboardRemove())
 
 
+async def relampago_cmd(update, context):
+    register_current_chat(update)
+    await update.message.reply_text(build_flash_promos_text(), reply_markup=ReplyKeyboardRemove())
+
+
 async def novas_cmd(update, context):
     register_current_chat(update)
 
     ranked = build_ranked_data()
-    new_items, _changed_items = scan_market_changes(ranked)
+    new_items, _changed_items, _flash_items = scan_market_changes(ranked)
 
     if not new_items:
         await update.message.reply_text(
@@ -671,7 +731,7 @@ async def mudancas_cmd(update, context):
     register_current_chat(update)
 
     ranked = build_ranked_data()
-    _new_items, changed_items = scan_market_changes(ranked)
+    _new_items, changed_items, _flash_items = scan_market_changes(ranked)
 
     if not changed_items:
         await update.message.reply_text(
@@ -719,7 +779,14 @@ async def historico_cmd(update, context):
         timestamp = event.get("timestamp", "N/A")
         item = event.get("item", {})
 
-        if kind == "new":
+        if kind == "flash_promo":
+            msg += (
+                f"{i}️⃣ ⚡ Promoção relâmpago\n"
+                f"🕒 {timestamp}\n"
+                f"💼 {item.get('type')} {item.get('rate')}% CDI\n"
+                f"🏦 {item.get('bank')}\n\n"
+            )
+        elif kind == "new":
             msg += (
                 f"{i}️⃣ 🆕 Nova oportunidade\n"
                 f"🕒 {timestamp}\n"
@@ -1001,6 +1068,7 @@ async def testealerta_cmd(update, context):
         "promo": True,
         "anomaly": True,
         "best_rate": True,
+        "flash_promo": True,
         "market_avg": 109.0,
         "beats_selic": True,
     }
@@ -1028,6 +1096,7 @@ def main():
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("promocoes", promocoes_cmd))
     app.add_handler(CommandHandler("anomalias", anomalias_cmd))
+    app.add_handler(CommandHandler("relampago", relampago_cmd))
     app.add_handler(CommandHandler("novas", novas_cmd))
     app.add_handler(CommandHandler("mudancas", mudancas_cmd))
     app.add_handler(CommandHandler("historico", historico_cmd))
